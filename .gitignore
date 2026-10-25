@@ -9,3 +9,12 @@ models/
 tools/tourney/runs/*/agents/
 tools/tourney/runs/fmax/*/agents/
 tools/tourney/runs/_full/*.lock
+.venv/
+.Xil/
+.agents/
+.aws/
+.codex/
+AGENTS.md
+/vivado*.jou
+/vivado*.log
+/vivado*.str

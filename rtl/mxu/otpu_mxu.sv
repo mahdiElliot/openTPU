@@ -116,7 +116,9 @@ module otpu_mxu
   // RF covers the pipeline's rows in flight (one-advance rows: one per cycle of its latency)
   localparam int RF = (LROW + 7 <= 32) ? 32 : 64;
   localparam int RFW = $clog2(RF);
-  localparam int MW = $clog2(MCOLS) + 1;
+  // Keep a nonempty column-index field below the carry/count bit at MCOLS=1.
+  // Multi-column configurations retain their original widths.
+  localparam int MW = (MCOLS > 1) ? $clog2(MCOLS) + 1 : 2;
   localparam int TD = 128;                  // port A requests in flight (their tags)
   localparam int TDW = $clog2(TD);
   // a lane: the pick, i2f48 (4), x Sw, x Sa'
@@ -1038,9 +1040,9 @@ module otpu_mxu
   otpu_delay #(.W($bits(rmw_t)), .N(LM + LA)) u_rw (.clk, .en(t_gnt), .d(r1), .q(rw));
   logic [3:0] rmw_n;                          // rows' lanes in flight (any nonzero = busy)
 
-  // RMAX: the running max is kept as its sort key (mk = fkey(max); the max is always stored
+  // RMAX: the running max is kept as its sort key (mx_key = fkey(max); the max is always stored
   // ftz'd, so fkey(max) is the key it is compared by); written out through unkey.
-  logic [31:0] mk [MCOLS];
+  logic [31:0] mx_key [MCOLS];
   logic [MCOLS-1:0] mx_have;
   logic mx_done;
   function automatic f32_t unkey(input logic [31:0] k);
@@ -1070,12 +1072,12 @@ module otpu_mxu
         if (rxh[k][j]) begin
           mx_hit[j] = 1'b1;
           mx_cand[j] = mx_cand[j] | fkey(rx.nv[k]);
-          mx_upd[j] = mx_upd[j] | !mx_have[j] | (fkey(rx.nv[k]) > mk[j]);
+          mx_upd[j] = mx_upd[j] | !mx_have[j] | (fkey(rx.nv[k]) > mx_key[j]);
         end
         if (rwh[k][j]) begin
           mx_hit[j] = 1'b1;
           mx_cand[j] = mx_cand[j] | fkey(ry[k]);
-          mx_upd[j] = mx_upd[j] | !mx_have[j] | (fkey(ry[k]) > mk[j]);
+          mx_upd[j] = mx_upd[j] | !mx_have[j] | (fkey(ry[k]) > mx_key[j]);
         end
       end
     end
@@ -1177,7 +1179,7 @@ module otpu_mxu
         if (mxm[k]) begin
           t_wen[k] = 1'b1;
           t_waddr[k] = mxl[k];
-          t_wdata[k] = unkey(mk[MW'(32'(mx_i) + 32'(k))]);
+          t_wdata[k] = unkey(mx_key[MW'(32'(mx_i) + 32'(k))]);
         end
       end
     end
@@ -1420,7 +1422,7 @@ module otpu_mxu
         end
         // RMAX (rx: registered so the lane selection and the max compare are in different cycles)
         for (int j = 0; j < MCOLS; j++) begin
-          if (mx_upd[j]) mk[j] <= mx_cand[j];
+          if (mx_upd[j]) mx_key[j] <= mx_cand[j];
           if (mx_hit[j]) mx_have[j] <= 1'b1;
         end
         rmw_n <= rmw_n + ((lo.v && c_acc) ? 4'd1 : 4'd0) - (rw.v ? 4'd1 : 4'd0);

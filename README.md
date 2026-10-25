@@ -1,5 +1,16 @@
 # openTPU
 
+Repository: [mahdiElliot/openTPU](https://github.com/mahdiElliot/openTPU).
+
+```bash
+git clone https://github.com/mahdiElliot/openTPU.git
+cd openTPU
+```
+
+This fork includes deployment support for the **MYIR MYS-ZU3EG K2 (2 GiB DDR4)**,
+including independent core/HP AXI clocks, JTAG control and Ethernet model loading.
+Follow the [128-PE Qwen3.5 deployment guide](docs/mys_zu3eg_jtag_128_16.md).
+
 **An open-source AI accelerator, developed by AI.**
 
 openTPU brings the lessons of [auto-arch-tournament](https://github.com/FeSens/auto-arch-tournament)

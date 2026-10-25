@@ -1,0 +1,84 @@
+# MYIR MYS-ZU3EG-8E2D-EDGE-K2, XCZU3EG-1SFVC784I, 2 GiB PS DDR4.
+# Core evaluation target. The existing PCIe/LiteDRAM board shell is not a Zynq PS wrapper.
+[target]
+name = "mys-zu3eg"
+kind = "fpga"
+platform_id = 3
+description = "MYIR MYS-ZU3EG K2 core evaluation: D32, 2 columns, 4 lanes, PS DDR4"
+
+[arch]
+S = 1
+D = 32
+MCOLS = 2
+ACT_BLOCKS = 192
+ACT_ROWS = 2
+TMEM_WORDS = 65536
+IMEM_WORDS = 32768
+DRAM_BYTES = 2147483648
+LANES = 4
+PAIR = false
+DSTEP = false
+STREAM = false
+SEQ_WC = false
+
+[uarch]
+MXU_IMPL = 2
+MXU_CL = 16
+MXU_E = 1
+VPU_CL = 1
+ULANES = 4
+TMEM_IMPL = 3
+TMEM_NSB = 2
+TMEM_SBP = 3
+TMEM_SBH = 0
+TMEM_RPL = true
+TMEM_TDP = true
+TMEM_GST = true
+TMEM_PMP = 0
+RPB = 32
+WPB = 1
+WIN = 8
+FIFO_DEPTH = 64
+TRACE_DEPTH = 0
+PQ_WIN = 1024
+CHASH = false
+
+[tech]
+family = "xilinxus"
+part = "xczu3eg-sfvc784-1-i"
+vendor = "xilinx"
+
+[platform]
+board = "mys-zu3eg"
+core_mhz = 50.0
+mem = "ps-ddr4"
+channels_per_slice = 1
+channel_bytes = 2147483648
+beat_bytes = 16
+host = "ps-axi"
+
+# Performance candidates; baseline above retains the original validated configuration.
+[variants.d64-m2]
+D = 64
+MCOLS = 2
+ACT_BLOCKS = 96
+ACT_ROWS = 2
+PAIR = true
+MXU_E = 2
+
+[variants.d32-m4]
+D = 32
+MCOLS = 4
+ACT_BLOCKS = 192
+ACT_ROWS = 4
+IMEM_WORDS = 16384
+PAIR = true
+MXU_E = 2
+
+[variants.d128-m1]
+D = 128
+MCOLS = 1
+ACT_BLOCKS = 48
+ACT_ROWS = 1
+PAIR = false
+MXU_E = 1

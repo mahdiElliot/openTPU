@@ -1,0 +1,1 @@
+Explain how a small FPGA can run a language model using quantized weights. Describe the roles of processing elements, on-chip memory, and external DDR memory. Then explain why processing the input prompt differs from generating output tokens, and identify which hardware bottleneck is likely to limit performance. Keep your answer clear and concise
