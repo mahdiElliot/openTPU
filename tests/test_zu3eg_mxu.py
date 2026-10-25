@@ -7,7 +7,9 @@ from opentpu.isasim import Machine
 
 
 @pytest.mark.parametrize('columns', [1, 2])
-def test_column_index_width_with_ascale_and_rmax(have_verilator, monkeypatch, columns):
+@pytest.mark.parametrize('tmem_impl', [0, 3])
+def test_column_index_width_with_ascale_and_rmax(have_verilator, monkeypatch, columns, tmem_impl):
+    one_copy = int(tmem_impl == 3)
     cfg = Config(S=1, D=128, MCOLS=columns, ACT_BLOCKS=8, LANES=4,
                  TMEM_WORDS=4096, IMEM_WORDS=2048, DRAM_BYTES=1 << 17)
     rng = np.random.default_rng(51)
@@ -32,6 +34,9 @@ def test_column_index_width_with_ascale_and_rmax(have_verilator, monkeypatch, co
     drams, tmems, _ = rtlsim.run(
         cfg, [program], [image], axi=False, max_cycles=20000,
         uarch={'WIN': 4, 'RPB': 32, 'WPB': 1, 'FIFO_DEPTH': 64,
-               'TMEM_IMPL': 0, 'MXU_E': 1, 'VPU_CL': 1, 'ULANES': 4})
+               'TMEM_IMPL': tmem_impl, 'TMEM_NSB': 2, 'TMEM_SBP': 3,
+               'TMEM_RPL': one_copy, 'TMEM_TDP': one_copy,
+               'TMEM_GST': one_copy, 'TMEM_PMP': 0,
+               'MXU_E': 1, 'VPU_CL': 1, 'ULANES': 4})
     assert np.array_equal(drams[0], reference.dram)
     assert np.array_equal(tmems[0], reference.tmem)
