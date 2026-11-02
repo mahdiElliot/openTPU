@@ -218,6 +218,19 @@ def verify_reference(out, result):
     print('BOARD_REQUEST_ISA_BIT_EXACT', flush=True)
 
 
+def memory_statistics(link, cycles):
+    if cycles >= 1 << 32:
+        raise RuntimeError('This run exceeds the 32-bit memory counter measurement range')
+    words = link.read(CONTROL_BASE + 0x300, 16).view('<u4').tolist()
+    if words[0] != 0x4d535431:
+        raise RuntimeError('Program a MEMORY_STATS bitstream before measuring memory stalls')
+    pressure, starve, union = words[1:]
+    if not max(pressure, starve) <= union <= min(cycles, pressure + starve):
+        raise RuntimeError(f'Invalid memory statistics: {words}, RUN cycles={cycles}')
+    return {'request_backpressure_cycles': pressure, 'weight_starvation_cycles': starve,
+            'either_condition_cycles': union, 'overlap_cycles': pressure + starve - union}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, default=DEPLOY / 'run')
@@ -237,6 +250,8 @@ def main():
                         help='compile the next prefill/decode program while the FPGA executes')
     parser.add_argument('--profile', action='store_true',
                         help='record per-step host, transfer, control and FPGA timings')
+    parser.add_argument('--memory-stats', action='store_true',
+                        help='read per-run counters from a MEMORY_STATS instrumented bitstream')
     stages = parser.add_mutually_exclusive_group()
     stages.add_argument('--prepare', action='store_true')
     stages.add_argument('--preflight', action='store_true')
@@ -331,6 +346,7 @@ def main():
                                  'physical JTAG to PS DDR and AXI-Lite controls'),
                    'data_transport': options.data_transport,
                    'run_control': options.run_control, 'compile_ahead': options.compile_ahead,
+                   'memory_stats_version': 1 if options.memory_stats else None,
                    'prefill_method': 'one row per run; LM head on final row only',
                    'decode_method': 'README perf.py: seed from prefill, then N forward/argmax steps'}
         save(options.out / 'request.json', request)
@@ -354,6 +370,8 @@ def main():
             row = {'phase': 'prefill', 'position': position, 'cycles': eng.stats[-1]['cycles'], 'wall_seconds': elapsed}
             if options.profile:
                 row['profile'] = link.take(elapsed, row['cycles'], khz * 1000)
+            if options.memory_stats:
+                row['memory_stats'] = memory_statistics(link, row['cycles'])
             steps.append(row)
             save(options.out / 'progress.json', request | {'complete': False, 'steps': steps})
             print(f'BOARD prefill {position+1}/{len(ids)}: {row["cycles"]} cycles, {elapsed:.3f} wall s', flush=True)
@@ -373,6 +391,8 @@ def main():
                    'cycles': eng.stats[-1]['cycles'], 'wall_seconds': time.monotonic() - step_begin, 'token': token}
             if options.profile:
                 row['profile'] = link.take(row['wall_seconds'], row['cycles'], khz * 1000)
+            if options.memory_stats:
+                row['memory_stats'] = memory_statistics(link, row['cycles'])
             steps.append(row)
             save(options.out / 'progress.json', request | {'complete': False, 'steps': steps, 'generated_tokens': generated})
             print(f'BOARD decode {index+1}/{options.decode}: {eng.stats[-1]["cycles"]} cycles, {tokenizer.decode([seed]+generated)!r}', flush=True)

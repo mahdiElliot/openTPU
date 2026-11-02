@@ -12,20 +12,23 @@ def test_ps_bridge_protocol(depth, width):
     _run_bridge(depth, width=width)
 
 
-def _run_bridge(depth, read_depth=8, width=256):
+def _run_bridge(depth, read_depth=8, width=256, read_chunks=1):
     flags = list(rtlsim.VFLAGS)
     try:
         rtlsim.VFLAGS[rtlsim.VFLAGS.index('-j') + 1] = '2'
         exe = rtlsim.build('tb_ps_dram', [
             rtlsim.RTL / 'boards/mys-zu3eg/otpu_ps_dram.sv',
             rtlsim.TB / 'otpu_ps_axi_mem.sv', rtlsim.TB / 'otpu_ps_test_mem.sv',
-            rtlsim.TB / 'tb_ps_dram.sv'], {'D': depth, 'READ_DEPTH': read_depth, 'AXI_DATA_WIDTH': width})
+            rtlsim.TB / 'tb_ps_dram.sv'], {'D': depth, 'READ_DEPTH': read_depth,
+                                       'READ_CHUNKS': read_chunks, 'AXI_DATA_WIDTH': width})
         result = rtlsim.run_sim([str(exe)], timeout=30)
         assert result.returncode == 0, result.stdout + result.stderr
         assert 'PS_DRAM_PROTOCOL_PASS' in result.stdout
         match = re.search(r'PS_DRAM_PIPELINE depth=(\d+) cycles=(\d+) max_reads=(\d+)', result.stdout)
         assert match, result.stdout
-        return {'read_depth': int(match[1]), 'cycles': int(match[2]), 'max_reads': int(match[3])}
+        bursts = re.search(r'chunks=(\d+) bursts=(\d+)', result.stdout)
+        return {'read_depth': int(match[1]), 'cycles': int(match[2]), 'max_reads': int(match[3]),
+                'chunks': int(bursts[1]), 'bursts': int(bursts[2])}
     finally:
         rtlsim.VFLAGS[:] = flags
 
@@ -46,10 +49,19 @@ def test_wide_ps_bridge_moves_chunks_in_fewer_beats():
     print('PS width comparison:', narrow, wide)
 
 
+@pytest.mark.parametrize('depth,width', [(128, 256), (64, 256), (32, 128)])
+def test_ps_bridge_combines_reads_and_keeps_sixteen_bursts_pending(depth, width):
+    result = _run_bridge(depth, read_depth=16, width=width, read_chunks=4)
+    assert result['max_reads'] == 16
+    assert result['bursts'] < result['chunks']
+    print('Combined reads:', depth, width, result)
+
+
 @pytest.mark.parametrize("target,fmt", [("mys-zu3eg:d128-m1", "int8"),
                                         ("mys-zu3eg:d128-m1", "int4"),
                                         ("mys-zu3eg:d64-m2", "int4")])
-def test_ps_board_kernel_matches_isa(tmp_path, target, fmt):
+@pytest.mark.parametrize('combined', [False, True])
+def test_ps_board_kernel_matches_isa(tmp_path, target, fmt, combined):
     import sys
     from dataclasses import replace
 
@@ -85,6 +97,8 @@ def test_ps_board_kernel_matches_isa(tmp_path, target, fmt):
         rtlsim.VFLAGS[rtlsim.VFLAGS.index('-j') + 1] = '2'
         parameters = {k: getattr(cfg, k) for k in ('D', 'MCOLS', 'ACT_BLOCKS', 'ACT_ROWS')}
         parameters['MXU_E'] = T.load(target).uarch['MXU_E']
+        if combined:
+            parameters.update(READ_DEPTH=16, READ_CHUNKS=4)
         executable = rtlsim.build('tb_ps_core', sources + [
             rtlsim.TB / 'otpu_ps_axi_mem.sv', rtlsim.TB / 'tb_ps_core.sv'], parameters)
         result = rtlsim.run_sim([str(executable), f'+dir={tmp_path}',

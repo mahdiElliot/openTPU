@@ -14,6 +14,8 @@ def main():
     parser.add_argument('--out', type=Path, default=DEPLOY / 'memory_path_check')
     parser.add_argument('--axi-data-width', type=int, choices=(128, 256), default=256,
                         help='128 is the comparison baseline; 256 exercises the wide path')
+    parser.add_argument('--read-depth', type=int, choices=(8, 16), default=8)
+    parser.add_argument('--read-chunks', type=int, choices=(1, 2, 4, 8), default=1)
     parser.add_argument('--vivado', type=Path, default=Path('/home/mahdi/vivado/Vivado/2022.2/bin/vivado'))
     options = parser.parse_args()
     out, vivado = options.out.resolve(), options.vivado.resolve()
@@ -24,7 +26,8 @@ def main():
     with (out / 'generate.log').open('w') as log:
         subprocess.run([str(vivado), '-mode', 'batch', '-notrace', '-source',
                         str(ROOT / 'boards/mys-zu3eg/check_memory_path.tcl'),
-                        '-tclargs', str(ROOT), str(out), str(options.axi_data_width)], cwd=out, env=environment,
+                        '-tclargs', str(ROOT), str(out), str(options.axi_data_width),
+                        str(options.read_depth), str(options.read_chunks)], cwd=out, env=environment,
                        stdout=log, stderr=subprocess.STDOUT, check=True)
     simulation = out / 'project/memory_path.sim/sim_1/behav/xsim'
     # This converter-only test needs no encrypted device primitives. Some local
@@ -53,6 +56,7 @@ def main():
               'bridge_axi_bits': options.axi_data_width, 'crossing_axi_bits': options.axi_data_width,
               'hp_axi_bits': 128,
               'read_depth': int(match[1]), 'stream_memory_cycles': int(match[2]),
+              'read_chunks': options.read_chunks,
               'max_hp_reads_pending': int(match[3]),
               'skipped_unused_empty_secureip_library': skipped_empty_secureip,
               'scope': 'functional vendor-IP simulation; CDC timing is checked by Vivado implementation'}

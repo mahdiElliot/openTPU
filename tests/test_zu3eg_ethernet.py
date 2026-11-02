@@ -221,6 +221,27 @@ def test_ethernet_data_link_always_closes_control():
     assert control.closed
 
 
+@pytest.mark.parametrize('words,cycles,valid', [
+    ([0x4d535431, 5, 7, 9], 20, True),
+    ([0, 5, 7, 9], 20, False),
+    ([0x4d535431, 5, 7, 6], 20, False),
+    ([0x4d535431, 5, 7, 13], 20, False),
+    ([0x4d535431, 5, 7, 9], 8, False),
+])
+def test_memory_counter_version_and_cycle_bounds(words, cycles, valid):
+    from tools.zu3eg.run_board import memory_statistics
+    class Link:
+        def read(self, address, size):
+            assert address == CONTROL_BASE + 0x300 and size == 16
+            return np.array(words, dtype='<u4').view(np.uint8)
+    if valid:
+        result = memory_statistics(Link(), cycles)
+        assert result['overlap_cycles'] == 3
+    else:
+        with pytest.raises(RuntimeError):
+            memory_statistics(Link(), cycles)
+
+
 @pytest.mark.parametrize('keep_running', [False, True])
 @pytest.mark.parametrize('verify_only', [False, True])
 def test_model_loader_keeps_monitor_alive_only_when_requested(tmp_path, monkeypatch, keep_running, verify_only):

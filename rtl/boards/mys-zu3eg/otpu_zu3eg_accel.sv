@@ -3,6 +3,10 @@
 module otpu_zu3eg_accel #(
   parameter int D = 128,
   parameter int AXI_DATA_WIDTH = 256,
+  parameter bit MEMORY_STATS = 1'b0,
+  parameter int BRIDGE_READ_DEPTH = 8,
+  parameter int BRIDGE_B_DEPTH = 8,
+  parameter int BRIDGE_READ_CHUNKS = 1,
   parameter int MCOLS = 1,
   parameter int ACT_BLOCKS = 48,
   parameter int ACT_ROWS = 1,
@@ -157,6 +161,46 @@ module otpu_zu3eg_accel #(
   logic [3:0] a_be, sw_be;
   logic [255:0] a_rdata;
   logic [D*8-1:0] b_wdata, b_rdata;
+  logic [1:0] memory_stall;
+  logic [31:0] ctrl_rdata;
+  if (MEMORY_STATS) begin : g_memory_stats
+    // Per-run counters, frozen after HALT/STOP. These are overlapping event
+    // conditions, not a claim that all these cycles prevented other useful work.
+    logic run_q, active_q, selected;
+    logic [31:0] pressure, starvation, either_stall, read_value;
+    always_ff @(posedge clk) begin
+      if (!aresetn) begin
+        run_q <= 1'b0; active_q <= 1'b0;
+        pressure <= '0; starvation <= '0; either_stall <= '0;
+        selected <= 1'b0; read_value <= '0;
+      end else begin
+        run_q <= run;
+        // core_perf is one cycle late: qualify it with the previous RUN/HALT
+        // state, including the final event but excluding program-loader traffic.
+        active_q <= run && !halted;
+        if (run && !run_q) begin
+          pressure <= '0; starvation <= '0; either_stall <= '0;
+        end else if (active_q) begin
+          pressure <= pressure + 32'(memory_stall[0]);
+          starvation <= starvation + 32'(memory_stall[1]);
+          either_stall <= either_stall + 32'(|memory_stall);
+        end
+        if (s_axi_arvalid && s_axi_arready) begin
+          selected <= s_axi_araddr >= 12'h300 && s_axi_araddr <= 12'h30c;
+          case (s_axi_araddr[11:2])
+            10'h0c0: read_value <= 32'h4d535431; // MST1: counter definition version
+            10'h0c1: read_value <= pressure;
+            10'h0c2: read_value <= starvation;
+            10'h0c3: read_value <= either_stall;
+            default: read_value <= '0;
+          endcase
+        end
+      end
+    end
+    assign s_axi_rdata = selected ? read_value : ctrl_rdata;
+  end else begin : g_no_memory_stats
+    assign s_axi_rdata = ctrl_rdata;
+  end
 
   otpu_asic_top #(
     .D(D), .MCOLS(MCOLS), .ACT_BLOCKS(ACT_BLOCKS), .ACT_ROWS(ACT_ROWS),
@@ -165,7 +209,7 @@ module otpu_zu3eg_accel #(
     .VPU_CL(VPU_CL), .ULANES(ULANES), .HAS_DSTEP(0), .TMEM_IMPL(3),
     .RPB(RPB), .WPB(WPB), .TMEM_NSB(TMEM_NSB), .TMEM_SBP(TMEM_SBP), .TMEM_SBH(TMEM_SBH),
     .TMEM_RPL(TMEM_RPL), .TMEM_TDP(TMEM_TDP), .TMEM_GST(TMEM_GST), .TMEM_PMP(TMEM_PMP), .TMEM_PRK(TMEM_PRK), .TMEM_SDM(TMEM_SDM),
-    .SEQ_WC(0), .COLL_GATHER(0)
+    .SEQ_WC(0), .COLL_GATHER(0), .MEMORY_STATS(MEMORY_STATS)
   ) u_core (
     .clk, .sys_rst(!aresetn), .rst(!aresetn || !run), .rinit,
     .ld_start, .ld_addr, .ld_n, .ld_busy,
@@ -173,9 +217,10 @@ module otpu_zu3eg_accel #(
     .sw_req, .sw_addr, .sw_wdata, .sw_be, .sw_rdy,
     .b_req, .b_we, .b_tag, .b_addr, .b_wdata, .b_wmask, .b_par,
     .b_rdy, .b_rvalid, .b_rtag, .b_rdata, .wr_idle, .rd_idle,
-    .halted, .error(core_error), .wait_to, .a_inval, .icount
+    .halted, .error(core_error), .wait_to, .a_inval, .icount, .memory_stall
   );
-  otpu_ps_dram #(.D(D), .AXI_DATA_WIDTH(AXI_DATA_WIDTH)) u_ddr (
+  otpu_ps_dram #(.D(D), .AXI_DATA_WIDTH(AXI_DATA_WIDTH), .READ_DEPTH(BRIDGE_READ_DEPTH),
+    .B_DEPTH(BRIDGE_B_DEPTH), .READ_CHUNKS(BRIDGE_READ_CHUNKS)) u_ddr (
     .clk, .rst(!aresetn), .a_flush(a_inval || !run),
     .a_req, .a_we, .a_addr, .a_wdata, .a_be, .a_rdy, .a_rvalid, .a_rdata,
     .sw_req, .sw_addr, .sw_wdata, .sw_be, .sw_rdy,
@@ -242,7 +287,7 @@ module otpu_zu3eg_accel #(
     .s_araddr(s_axi_araddr),
     .s_arvalid(s_axi_arvalid),
     .s_arready(s_axi_arready),
-    .s_rdata(s_axi_rdata),
+    .s_rdata(ctrl_rdata),
     .s_rresp(s_axi_rresp),
     .s_rvalid(s_axi_rvalid),
     .s_rready(s_axi_rready),

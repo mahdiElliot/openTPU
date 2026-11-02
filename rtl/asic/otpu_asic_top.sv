@@ -47,7 +47,8 @@ module otpu_asic_top
   parameter int TMEM_PRK   = 0,
   parameter int TMEM_SDM   = -1,
   parameter bit SEQ_WC     = 1'b0,      // the sequencer's wait entries (otpu_slice)
-  parameter bit COLL_GATHER = 1'b1      // 0: the collective unit runs BAR alone (otpu_coll_bar)
+  parameter bit COLL_GATHER = 1'b1,     // 0: the collective unit runs BAR alone (otpu_coll_bar)
+  parameter bit MEMORY_STATS = 1'b0
 ) (
   input  logic                clk,
   input  logic                sys_rst,      // the loader's reset
@@ -100,8 +101,11 @@ module otpu_asic_top
   output logic                error,
   output logic                wait_to,
   output logic                a_inval,
-  output logic [31:0]         icount
+  output logic [31:0]         icount,
+  output logic [1:0]          memory_stall
 );
+  perf_t core_perf;
+  assign memory_stall = MEMORY_STATS ? {core_perf.starve, core_perf.dwait} : 2'b00;
   initial if (TMEM_PMP != 0) $fatal(1, "otpu_asic_top: TMEM_PMP %0d: an ASIC does not pump its SRAM", TMEM_PMP);
   logic [31:0] rinit_a [8];
   always_comb for (int k = 0; k < 8; k++) rinit_a[k] = rinit[k];
@@ -131,7 +135,7 @@ module otpu_asic_top
     .coll_req, .coll_cmd(coll_cmd[0]), .coll_ack,
     .coll_ren(coll_ren[0]), .coll_raddr(coll_raddr[0]), .coll_rdata(coll_rdata[0]),
     .coll_wen, .coll_waddr, .coll_wdata, .coll_gnt_local(coll_gl), .coll_gnt(coll_gl),
-    .halted, .error(s_error), .wait_to, .a_inval, .icount, .pf(), .dump(1'b0));
+    .halted, .error(s_error), .wait_to, .a_inval, .icount, .pf(core_perf), .dump(1'b0));
 
   if (COLL_GATHER) begin : g_coll
     otpu_coll #(.S(1), .LANES(LANES)) u_coll (

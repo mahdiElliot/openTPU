@@ -1,6 +1,7 @@
 // Complete board-control, loader, core and PS-memory-path ISA comparison.
 module tb_ps_core #(
-  parameter int D = 128, MCOLS = 1, ACT_BLOCKS = 48, ACT_ROWS = 1, MXU_E = 1, AXI_DATA_WIDTH = 256
+  parameter int D = 128, MCOLS = 1, ACT_BLOCKS = 48, ACT_ROWS = 1, MXU_E = 1,
+                AXI_DATA_WIDTH = 256, READ_DEPTH = 8, READ_CHUNKS = 1
 );
   localparam int WORDS = 1 << 18;
   logic clk = 0, aresetn = 0, dump = 0;
@@ -60,7 +61,25 @@ module tb_ps_core #(
   logic s_axi_rvalid;
   logic s_axi_rready = '0;
   otpu_zu3eg_accel #(.D(D), .MCOLS(MCOLS), .ACT_BLOCKS(ACT_BLOCKS),
-                      .ACT_ROWS(ACT_ROWS), .MXU_E(MXU_E), .AXI_DATA_WIDTH(AXI_DATA_WIDTH)) dut (.*);
+                      .ACT_ROWS(ACT_ROWS), .MXU_E(MXU_E), .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
+                      .MEMORY_STATS(1), .BRIDGE_READ_DEPTH(READ_DEPTH),
+                      .BRIDGE_B_DEPTH(READ_DEPTH > 8 ? READ_DEPTH : 8),
+                      .BRIDGE_READ_CHUNKS(READ_CHUNKS)) dut (.*);
+  int expected_pressure = 0, expected_starve = 0, expected_either = 0;
+  logic previous_active = 0, previous_pressure = 0, previous_starve = 0;
+  always @(posedge clk) begin
+    if (previous_active) begin
+      expected_pressure += int'(previous_pressure);
+      expected_starve += int'(previous_starve);
+      expected_either += int'(previous_pressure || previous_starve);
+    end
+    previous_active = dut.run && !dut.halted;
+    // Check the counters against source events, before perf's pipeline stage.
+    previous_pressure = (dut.u_core.u_slice.b_req_c && !dut.u_core.u_slice.b_rdy_i) ||
+      (dut.u_core.u_slice.mxu_areq && !dut.u_core.u_slice.a_rdy_i) ||
+      (dut.u_core.u_slice.q_awant && !dut.u_core.u_slice.sw_rdy_i);
+    previous_starve = dut.u_core.u_slice.mxu_starve;
+  end
   wire wr_idle = dut.wr_idle;
   otpu_ps_axi_mem #(.WORDS(WORDS), .DATA_WIDTH(AXI_DATA_WIDTH), .BASE(40'h10000000)) memory_model (
     .clk, .rst(!aresetn), .wr_idle,
@@ -106,6 +125,19 @@ module tb_ps_core #(
     do begin read_reg(12'h00c, status); end while (!(status & 8));
     read_reg(12'h018, status); cycles = status;
     repeat (8) @(negedge clk);
+    read_reg(12'h300, status);
+    if (status != 32'h4d535431) $fatal(1, "memory stats signature %x", status);
+    read_reg(12'h304, status);
+    if (status != expected_pressure) $fatal(1, "pressure counter %d expected %d", status, expected_pressure);
+    read_reg(12'h308, status);
+    if (status != expected_starve) $fatal(1, "starvation counter %d expected %d", status, expected_starve);
+    read_reg(12'h30c, status);
+    if (status != expected_either) $fatal(1, "union counter %d expected %d", status, expected_either);
+    write_reg(12'h008, 0);
+    repeat (8) @(negedge clk);
+    read_reg(12'h30c, status);
+    if (status != expected_either) $fatal(1, "STOP changed memory statistics");
+    $display("MEMORY_STATS_PASS pressure=%0d starve=%0d either=%0d", expected_pressure, expected_starve, expected_either);
     fd = $fopen({dir, "/dram_out.bin"}, "wb");
     for (int i = 0; i < WORDS; i++) begin
       $fwrite(fd, "%c%c%c%c", memory_model.memory[i][7:0], memory_model.memory[i][15:8], memory_model.memory[i][23:16], memory_model.memory[i][31:24]);

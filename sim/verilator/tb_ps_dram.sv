@@ -1,8 +1,10 @@
 `timescale 1ns/1fs
 // PS bridge protocol regression: independent AW/W/R stalls, delayed B responses,
 // masked chunk stores, byte stores, tagged reads, and host cache invalidation.
-module tb_ps_dram #(parameter int D = 128, READ_DEPTH = 8, AXI_DATA_WIDTH = 256, VENDOR_PATH = 0);
+module tb_ps_dram #(parameter int D = 128, READ_DEPTH = 8, READ_CHUNKS = 1,
+                    AXI_DATA_WIDTH = 256, VENDOR_PATH = 0);
   localparam int CW = D/4;
+  localparam int STREAM_N = (READ_DEPTH*READ_CHUNKS+8 > 24) ? READ_DEPTH*READ_CHUNKS+8 : 24;
   logic clk = 0, mem_clk = 0;
   // The vendor path uses the deployment clocks; the direct model uses 100 MHz.
   always #(500.0/332.8125) mem_clk = !mem_clk;
@@ -30,7 +32,8 @@ module tb_ps_dram #(parameter int D = 128, READ_DEPTH = 8, AXI_DATA_WIDTH = 256,
   logic [1:0] m_axi_bresp, m_axi_rresp;
   logic m_axi_bvalid, m_axi_rvalid, m_axi_rlast;
   logic m_axi_bready, m_axi_rready;
-  otpu_ps_dram #(.BASE(0), .D(D), .READ_DEPTH(READ_DEPTH), .AXI_DATA_WIDTH(AXI_DATA_WIDTH)) dut (.*);
+  otpu_ps_dram #(.BASE(0), .D(D), .READ_DEPTH(READ_DEPTH), .READ_CHUNKS(READ_CHUNKS),
+    .B_DEPTH(READ_DEPTH > 8 ? READ_DEPTH : 8), .AXI_DATA_WIDTH(AXI_DATA_WIDTH)) dut (.*);
 
   logic hold_reads = 0, hold_b = 0, inject_b_error = 0, inject_r_error = 0;
   int read_bursts, max_read_pending, cycles;
@@ -103,7 +106,7 @@ module tb_ps_dram #(parameter int D = 128, READ_DEPTH = 8, AXI_DATA_WIDTH = 256,
     send_write_b(at, enables); drain();
   endtask
   initial begin
-    int start_cycles, stream_cycles, stream_max, old_reads;
+    int start_cycles, stream_cycles, stream_max, stream_bursts, old_reads;
     for (int i = 0; i < 2048; i++) begin
       memory_model.slave.memory[i] = 32'h56000000 + i;
       expected[i] = memory_model.slave.memory[i];
@@ -132,7 +135,7 @@ module tb_ps_dram #(parameter int D = 128, READ_DEPTH = 8, AXI_DATA_WIDTH = 256,
     old_reads = read_bursts;
     fork
       begin
-        for (int i = 0; i < 24; i++) send_b((i % 16) * CW, 1'(i));
+        for (int i = 0; i < STREAM_N; i++) send_b((i % 16) * CW, 1'(i));
       end
       begin
         wait (dut.rn == READ_DEPTH);
@@ -143,6 +146,9 @@ module tb_ps_dram #(parameter int D = 128, READ_DEPTH = 8, AXI_DATA_WIDTH = 256,
     join
     drain();
     stream_cycles = cycles - start_cycles;
+    stream_bursts = read_bursts - old_reads;
+    if (READ_CHUNKS > 1 && stream_bursts >= STREAM_N)
+      $fatal(1, "contiguous reads were not combined");
     stream_max = max_read_pending;
     if ((!VENDOR_PATH && max_read_pending != READ_DEPTH) || max_read_pending < 1)
       $fatal(1, "read credits not filled: %0d", max_read_pending);
@@ -154,6 +160,9 @@ module tb_ps_dram #(parameter int D = 128, READ_DEPTH = 8, AXI_DATA_WIDTH = 256,
       begin for (int i = 0; i < 12; i++) send_a(768 + 8*(i/3)); end
     join
     drain();
+
+    // Consecutive chunks on opposite sides of a 4-KiB boundary cannot merge.
+    send_b(1024-CW, 0); send_b(1024, 1); drain();
 
     // A stopped/flush-invalidated miss must not refill a stale scale cache later.
     hold_reads = 1;
@@ -209,7 +218,7 @@ module tb_ps_dram #(parameter int D = 128, READ_DEPTH = 8, AXI_DATA_WIDTH = 256,
     if (error) $fatal(1, "error did not reset");
     inject_b_error = 1; scalar_write(1, 42, 15);
     if (!error) $fatal(1, "AXI write error not recorded");
-    $display("PS_DRAM_PIPELINE depth=%0d cycles=%0d max_reads=%0d width=%0d", READ_DEPTH, stream_cycles, stream_max, AXI_DATA_WIDTH);
+    $display("PS_DRAM_PIPELINE depth=%0d cycles=%0d max_reads=%0d width=%0d chunks=%0d bursts=%0d", READ_DEPTH, stream_cycles, stream_max, AXI_DATA_WIDTH, STREAM_N, stream_bursts);
     $display("PS_DRAM_PROTOCOL_PASS");
     $finish;
   end

@@ -9,6 +9,7 @@ module otpu_ps_dram #(
   parameter int D = 128,
   parameter int AXI_DATA_WIDTH = 256,
   parameter int READ_DEPTH = 8,
+  parameter int READ_CHUNKS = 1,
   parameter int A_DEPTH = 4,
   parameter int B_DEPTH = 8,
   parameter int SW_DEPTH = 4,
@@ -55,10 +56,16 @@ module otpu_ps_dram #(
   localparam int AXI_BYTES = AXI_DATA_WIDTH / 8;
   localparam int AXI_SIZE = $clog2(AXI_BYTES);
   localparam int WORD_LG = AXI_SIZE - 2;
+  localparam int GP = (READ_CHUNKS > 1) ? $clog2(READ_CHUNKS) : 1;
+  localparam int GC = $clog2(READ_CHUNKS + 1);
+  localparam int BF = $clog2(READ_DEPTH * READ_CHUNKS + 1);
   initial begin
     if (!(AXI_DATA_WIDTH inside {128, 256}) || D*8 < AXI_DATA_WIDTH)
       $fatal(1, "PS bridge requires AXI_DATA_WIDTH=128/256 and D >= one AXI beat");
     if (!(D inside {32, 64, 128})) $fatal(1, "ZU3EG PS bridge requires D=32,64,128");
+    if (!(READ_CHUNKS inside {1, 2, 4, 8}) || READ_CHUNKS * D / AXI_BYTES > 256 ||
+        (READ_CHUNKS > 1 && BASE[11:0] != 0))
+      $fatal(1, "Read grouping requires 1/2/4/8 chunks and a 4-KiB-aligned BASE");
     if (READ_DEPTH < 1 || (READ_DEPTH & (READ_DEPTH-1)) != 0 ||
         A_DEPTH < 2 || (A_DEPTH & (A_DEPTH-1)) != 0 ||
         B_DEPTH < 2 || (B_DEPTH & (B_DEPTH-1)) != 0 ||
@@ -83,7 +90,9 @@ module otpu_ps_dram #(
     logic [3:0] be;
   } swq_t;
   typedef struct packed {
-    logic port_b, tag;
+    logic port_b;
+    logic [READ_CHUNKS-1:0] tags;
+    logic [GP-1:0] chunks_last;
     logic [2:0] last;
   } rt_t;
   // Payload arrays have no reset: only valid counts/pointers reset. In particular,
@@ -114,7 +123,7 @@ module otpu_ps_dram #(
   logic [28:0] a_line, cache_line;
   logic cache_valid;
   logic [255:0] cache_data;
-  logic [RP:0] b_flight;
+  logic [BF-1:0] b_flight;
   logic [AP:0] a_pending;
   logic [BP+RP+1:0] b_pending;
   wire a_head_read = an != 0 && !aq[ah].we;
@@ -126,7 +135,10 @@ module otpu_ps_dram #(
   // A registered AR remains unchanged under backpressure. A single ID lets the
   // PS keep many reads in flight without a data reorder buffer. Credits reserve
   // a metadata entry before ARVALID; the consumer has reserved its response room.
-  logic ar_valid, ar_port_b, ar_tag, prefer_b;
+  logic ar_valid, ar_port_b, prefer_b;
+  logic [READ_CHUNKS-1:0] ar_tags;
+  logic [GP-1:0] ar_chunks_last, rchunk;
+  logic [7:0] ar_burst_last;
   logic [39:0] ar_addr;
   logic [2:0] ar_last;
   logic [RP-1:0] rh, rt;
@@ -140,14 +152,33 @@ module otpu_ps_dram #(
   end
   wire ar_fire = m_axi_arvalid && m_axi_arready;
   wire r_fire = m_axi_rvalid && m_axi_rready;
-  wire r_done = r_fire && (m_axi_rlast || rbeat == rq[rh].last);
+  wire chunk_done = r_fire && (rbeat == rq[rh].last || m_axi_rlast);
+  wire r_done = r_fire && (m_axi_rlast ||
+                (rbeat == rq[rh].last && rchunk == rq[rh].chunks_last));
   wire a_done = r_done && !rq[rh].port_b;
-  wire b_done = r_done && rq[rh].port_b;
+  wire b_done = chunk_done && rq[rh].port_b;
   assign m_axi_arvalid = ar_valid && !rst;
   assign m_axi_araddr = ar_addr;
-  assign m_axi_arlen = {5'd0, ar_last};
+  assign m_axi_arlen = ar_burst_last;
   assign m_axi_rready = !rst && rn != 0;
   assign rd_idle = a_pending == 0 && b_pending == 0 && !a_rvalid && !b_rvalid;
+
+  // Collect only accepted, consecutive B reads. No speculative data is read.
+  // A discontinuity, store, 4-KiB boundary, or bounded timeout ends the group.
+  // Per-chunk tags remain in issue order and each core response is still D bytes.
+  logic [GC-1:0] gather_count;
+  logic [31:0] gather_word, gather_next;
+  logic [READ_CHUNKS-1:0] gather_tags;
+  logic [3:0] gather_age;
+  wire gather_match = b_head_read && bq[bh].addr == gather_next &&
+                       bq[bh].addr[31:10] == gather_word[31:10];
+  wire gather_ready = gather_count != 0 &&
+    (gather_count == GC'(READ_CHUNKS) || gather_age == 4'(2*READ_CHUNKS-1) ||
+     (bn != 0 && !gather_match));
+  wire gather_take = READ_CHUNKS > 1 && !ar_valid && rn < (RP+1)'(READ_DEPTH) &&
+    !gather_ready && b_head_read && gather_count < GC'(READ_CHUNKS) &&
+    (gather_count == 0 || gather_match);
+  wire b_issue_ready = READ_CHUNKS == 1 ? b_head_read : gather_ready;
 
   // Only one AXI write burst needs an active payload register. Input queues
   // absorb more stores while AW/W/B stall; reads continue on their own engine.
@@ -162,7 +193,8 @@ module otpu_ps_dram #(
   logic [AP:0] a_writes;
   logic [BP:0] b_writes;
   wire w_done = ws == W_RESP && m_axi_bvalid;
-  wire [2:0] w_candidates = {bn != 0 && bq[bh].we && b_flight == 0,
+  wire [2:0] w_candidates = {bn != 0 && bq[bh].we && b_flight == 0 &&
+                             gather_count == 0 && !(ar_valid && ar_port_b),
                              an != 0 && aq[ah].we && !a_flight, sn != 0};
   always_comb begin
     have_w = 1'b0;
@@ -200,7 +232,8 @@ module otpu_ps_dram #(
 
   always_comb begin
     a_pop = a_hit || (ar_fire && !ar_port_b) || (w_done && wport == W_A);
-    b_pop = (ar_fire && ar_port_b) || (w_done && wport == W_B);
+    b_pop = (READ_CHUNKS == 1 ? (ar_fire && ar_port_b) : gather_take) ||
+            (w_done && wport == W_B);
     sw_pop = w_done && wport == W_SW;
   end
   always_ff @(posedge clk) begin
@@ -208,7 +241,8 @@ module otpu_ps_dram #(
     if (b_push) bq[bt] <= '{we:b_we, tag:b_tag, addr:b_addr};
     if (b_push && b_we) begin bq_data[bt] <= b_wdata; bq_mask[bt] <= b_wmask; end
     if (sw_push) sq[st] <= '{addr:sw_addr, data:sw_wdata, be:sw_be};
-    if (ar_fire) rq[rt] <= '{port_b:ar_port_b, tag:ar_tag, last:ar_last};
+    if (ar_fire) rq[rt] <= '{port_b:ar_port_b, tags:ar_tags,
+                             chunks_last:ar_chunks_last, last:ar_last};
     if (r_fire) rpayload[AXI_DATA_WIDTH*rbeat +: AXI_DATA_WIDTH] <= m_axi_rdata;
   end
 
@@ -218,7 +252,10 @@ module otpu_ps_dram #(
       bh <= '0; bt <= '0; bn <= '0;
       sh <= '0; st <= '0; sn <= '0;
       rh <= '0; rt <= '0; rn <= '0;
-      ar_valid <= 1'b0; ar_port_b <= 1'b0; ar_tag <= 1'b0;
+      ar_valid <= 1'b0; ar_port_b <= 1'b0; ar_tags <= '0;
+      ar_chunks_last <= '0; ar_burst_last <= '0; rchunk <= '0;
+      gather_count <= '0; gather_word <= '0; gather_next <= '0;
+      gather_tags <= '0; gather_age <= '0;
       ar_addr <= '0; ar_last <= '0; prefer_b <= 1'b0;
       rbeat <= '0;
       a_pending <= '0; b_pending <= '0; b_flight <= '0;
@@ -245,21 +282,38 @@ module otpu_ps_dram #(
       b_pending <= b_pending + (BP+RP+2)'(b_push && !b_we) - (BP+RP+2)'(b_done);
       a_writes <= a_writes + (AP+1)'(a_push && a_we) - (AP+1)'(w_done && wport == W_A);
       b_writes <= b_writes + (BP+1)'(b_push && b_we) - (BP+1)'(w_done && wport == W_B);
-      b_flight <= b_flight + (RP+1)'(ar_fire && ar_port_b) - (RP+1)'(b_done);
+      b_flight <= b_flight + (ar_fire && ar_port_b ? BF'(ar_chunks_last) + BF'(1) : BF'(0)) - BF'(b_done);
       rn <= rn + (RP+1)'(ar_fire) - (RP+1)'(r_done);
       if (ar_fire) rt <= (READ_DEPTH == 1) ? '0 : rt + 1'b1;
       if (r_done) rh <= (READ_DEPTH == 1) ? '0 : rh + 1'b1;
 
+      if (gather_count != 0 && gather_age < 4'(2*READ_CHUNKS-1)) gather_age <= gather_age + 1'b1;
+      if (gather_take) begin
+        if (gather_count == 0) begin gather_word <= bq[bh].addr; gather_age <= '0; end
+        gather_next <= bq[bh].addr + 32'(D/4);
+        gather_tags[gather_count] <= bq[bh].tag;
+        gather_count <= gather_count + 1'b1;
+      end
       if (!ar_valid && rn < (RP+1)'(READ_DEPTH)) begin
         // Round-robin A/B misses. A hits return locally and do not use an AXI slot.
-        if (b_head_read && (prefer_b || !a_head_read || a_flight || a_hit)) begin
+        if (b_issue_ready && (prefer_b || !a_head_read || a_flight || a_hit)) begin
           ar_valid <= 1'b1; ar_port_b <= 1'b1;
-          ar_addr <= BASE + {6'd0, bq[bh].addr, 2'd0};
-          ar_last <= 3'(D/AXI_BYTES-1); ar_tag <= bq[bh].tag;
+          ar_last <= 3'(D/AXI_BYTES-1);
+          if (READ_CHUNKS == 1) begin
+            ar_addr <= BASE + {6'd0, bq[bh].addr, 2'd0};
+            ar_tags <= READ_CHUNKS'(bq[bh].tag); ar_chunks_last <= '0;
+            ar_burst_last <= 8'(D/AXI_BYTES-1);
+          end else begin
+            ar_addr <= BASE + {6'd0, gather_word, 2'd0};
+            ar_tags <= gather_tags; ar_chunks_last <= GP'(gather_count-1'b1);
+            ar_burst_last <= 8'(int'(gather_count)*(D/AXI_BYTES)-1);
+            gather_count <= '0; gather_age <= '0;
+          end
         end else if (a_head_read && !a_flight && !a_hit) begin
           ar_valid <= 1'b1; ar_port_b <= 1'b0;
           ar_addr <= BASE + {6'd0, aq[ah].addr[31:3], 5'd0};
-          ar_last <= 3'(32/AXI_BYTES-1); ar_tag <= 1'b0;
+          ar_last <= 3'(32/AXI_BYTES-1); ar_tags <= '0; ar_chunks_last <= '0;
+          ar_burst_last <= 8'(32/AXI_BYTES-1);
         end
       end
       if (ar_fire) begin
@@ -273,13 +327,15 @@ module otpu_ps_dram #(
       end
       if (a_hit) begin a_rvalid <= 1'b1; a_rdata <= cache_data; end
       if (r_fire) begin
-        if (m_axi_rresp != 0 || m_axi_rid != 0 || m_axi_rlast != (rbeat == rq[rh].last))
+        if (m_axi_rresp != 0 || m_axi_rid != 0 ||
+            m_axi_rlast != (rbeat == rq[rh].last && rchunk == rq[rh].chunks_last))
           error <= 1'b1;
-        if (r_done) begin
+        if (chunk_done) begin
           rbeat <= '0;
+          rchunk <= r_done ? '0 : rchunk + 1'b1;
           if (rq[rh].port_b) begin
             b_rvalid <= 1'b1;
-            b_rtag <= rq[rh].tag;
+            b_rtag <= rq[rh].tags[rchunk];
             b_rdata <= rcomplete;
           end else begin
             a_flight <= 1'b0;
