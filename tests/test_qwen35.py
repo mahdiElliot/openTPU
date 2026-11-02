@@ -307,6 +307,28 @@ def test_tiny_chunked_prefill_is_bit_exact(tiny, config, first, chunk, dstep):
     assert all(np.array_equal(eng.step(t), w) for t, w in zip(toks[17:], want[17:]))
 
 
+def test_one_column_int4_prefill_reuses_four_rows_bit_exact(tiny):
+    """128x1 PEs replay weight tiles for four prompt rows; recurrent state is unchanged."""
+    from dataclasses import replace
+    from opentpu import target as T
+    from tools.zu3eg.run_board import forward_prefill
+    _, weights, spec = tiny
+    cfg = replace(T.config('mys-zu3eg:d128-m1-r4'), DRAM_BYTES=1 << 25)
+    options = dict(cfg=cfg, cap=256, rows=4, wformat='int4', head_format='int8',
+                   pipeline=False, resident=False, snapshots=0)
+    ref = Engine(spec, weights, **options)
+    grouped = Engine(spec, weights, **options)
+    tokens = [int(t) for t in np.random.default_rng(81).integers(0, 1000, 19)]
+    for token in tokens[:17]:
+        expected = ref.step(token)
+    actual = forward_prefill(grouped, tokens[:17], lambda *args: None, rows=4)
+    assert np.array_equal(actual.view(np.uint32), expected.view(np.uint32))
+    assert [s['rows'] for s in grouped.stats] == [4, 4, 4, 4, 1]
+    assert all(np.array_equal(a, b) for a, b in zip(_layers_dram(grouped), _layers_dram(ref)))
+    for token in tokens[17:]:
+        assert np.array_equal(grouped.step(token).view(np.uint32), ref.step(token).view(np.uint32))
+
+
 @pytest.mark.parametrize("nk,grouped", [(16, False), (8, False), (8, True)],
                          ids=["kh16", "kh8", "kh8-grouped"])
 def test_dstep_rows_pipeline_is_bit_exact(nk, grouped):

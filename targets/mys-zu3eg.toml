@@ -82,3 +82,12 @@ ACT_BLOCKS = 48
 ACT_ROWS = 1
 PAIR = false
 MXU_E = 1
+
+# Same 128 PEs; activation rows replay each weight tile during prompt prefill.
+[variants.d128-m1-r4]
+D = 128
+MCOLS = 1
+ACT_BLOCKS = 48
+ACT_ROWS = 4
+PAIR = false
+MXU_E = 1

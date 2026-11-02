@@ -52,7 +52,10 @@ module otpu_actram #(
   localparam int GW = (GROUPS > 1) ? $clog2(GROUPS) : 1;
   localparam int PB = (D > 32) ? 32 : D;      // bytes per piece
   localparam int NP = D / PB;
-  localparam int RAW = $clog2(GROUPS * BLOCKS);  // the RAMs' address bits
+  // Addresses concatenate {group, block}, so each group occupies 2**BW
+  // slots even when BLOCKS is not a power of two (e.g. ZU3EG's 48 blocks).
+  localparam int SLOTS = (GROUPS > 1) ? GROUPS * (1 << BW) : BLOCKS;
+  localparam int RAW = $clog2(SLOTS);  // the RAMs' address bits
   initial if (D % LANES != 0) $fatal(1, "otpu_actram: LANES must divide D");
   initial if (D % PB != 0) $fatal(1, "otpu_actram: D must be a multiple of 32 above 32");
   initial if (ROWS % MCOLS != 0 || (GROUPS > 1 && (MCOLS & (MCOLS - 1)) != 0))
@@ -162,7 +165,7 @@ module otpu_actram #(
       end
       wire [GW+BW-1:0] wa = (GROUPS > 1) ? {wg, wb} : (GW+BW)'(wb);
       // the piece's bytes: a technology RAM with byte enables (rtl/tech)
-      otpu_ram_1r1w_be #(.W(PB*8), .N(GROUPS*BLOCKS), .STYLE("auto")) u_act (
+      otpu_ram_1r1w_be #(.W(PB*8), .N(SLOTS), .STYLE("auto")) u_act (
         .clk, .we(wsel), .wbe(wbe[p*PB +: PB]), .wa(wa[RAW-1:0]), .wd(wd[p*PB*8 +: PB*8]),
         .re(ren[j]), .ra(ra[RAW-1:0]), .rd);
       assign r_data[j*D*8 + p*PB*8 +: PB*8] = rd;
@@ -171,7 +174,7 @@ module otpu_actram #(
 `endif
     end
     // the column's block scale records
-    otpu_ram_1r1w #(.W(64), .N(GROUPS*BLOCKS), .STYLE("auto")) u_asc (
+    otpu_ram_1r1w #(.W(64), .N(SLOTS), .STYLE("auto")) u_asc (
       .clk, .we(ssel[j]), .wa(sa[RAW-1:0]), .wd(sd), .re(ren[j]), .ra(ra[RAW-1:0]), .rd(rs));
     assign r_scale[j*64 +: 64] = rs;
 `ifndef SYNTHESIS

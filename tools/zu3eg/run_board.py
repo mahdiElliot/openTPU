@@ -35,15 +35,15 @@ def file_digest(path):
     return h.hexdigest()
 
 
-def model_layout(model, target, capacity):
+def model_layout(model, target, capacity, rows=1):
     return {'target': target, 'config': asdict(T.config(target)), 'capacity': capacity,
-            'rows': 1, 'wformat': 'int4', 'head_format': 'int8', 'lookup': False,
+            'rows': rows, 'wformat': 'int4', 'head_format': 'int8', 'lookup': False,
             'checkpoint': imgcache.checkpoint(model), 'source': progcache.source()}
 
 
-def engine(model, out, backend, target=DEFAULT_TARGET, capacity=CAPACITY, pipeline=False):
+def engine(model, out, backend, target=DEFAULT_TARGET, capacity=CAPACITY, pipeline=False, rows=1):
     cfg, spec = T.config(target), load_spec(model)
-    layout = digest(model_layout(model, target, capacity))
+    layout = digest(model_layout(model, target, capacity, rows))
 
     def build(image, weights, unused_layout):
         path, manifest = out / 'model_image.bin', out / 'model_image.json'
@@ -62,11 +62,11 @@ def engine(model, out, backend, target=DEFAULT_TARGET, capacity=CAPACITY, pipeli
         temporary.replace(path)
         save(manifest, {'layout_digest': layout, 'sha256': file_digest(path),
                         'image_bytes': image.nbytes, 'target': target,
-                        'config': asdict(cfg), 'capacity': capacity})
+                        'config': asdict(cfg), 'capacity': capacity, 'rows': rows})
         return images
 
     with patch.object(imgcache, 'build', build):
-        return Engine(spec, load_weights(model), cfg=cfg, cap=capacity, rows=1,
+        return Engine(spec, load_weights(model), cfg=cfg, cap=capacity, rows=rows,
                       backend=backend, pipeline=pipeline, resident=False,
                       wformat='int4', head_format='int8', prog_cache=False, snapshots=0)
 
@@ -78,7 +78,8 @@ def kernel_check(link, out, target, hardware_id, fmt='int8'):
     sys.path.insert(0, str(ROOT / 'tests'))
     from test_kernels import mlp_args
     cfg = replace(T.config(target), DRAM_BYTES=1 << 20)
-    args, _ = mlp_args(np.random.default_rng(42), M=1, H=128, Fd=256)
+    nrows = min(cfg.act_rows, 4) if cfg.act_rows > cfg.MCOLS else 1
+    args, _ = mlp_args(np.random.default_rng(42), M=nrows, H=128, Fd=256)
     for value in args.values():
         if isinstance(value, Weight):
             value.fmt = fmt
@@ -89,7 +90,7 @@ def kernel_check(link, out, target, hardware_id, fmt='int8'):
     actual = backend.read(0, 0, cfg.DRAM_BYTES)
     different = int(np.count_nonzero(actual != reference.slices[0].dram))
     result = {'passed': different == 0, 'target': target, 'hardware_id': hardware_id,
-              'weight_format': fmt, 'dram_compared_bytes': cfg.DRAM_BYTES,
+              'weight_format': fmt, 'rows': nrows, 'dram_compared_bytes': cfg.DRAM_BYTES,
               'different_bytes': different, 'stats': stats}
     save(out / f'kernel_{fmt}_result.json', result)
     if different:
@@ -97,9 +98,9 @@ def kernel_check(link, out, target, hardware_id, fmt='int8'):
     print('BOARD_KERNEL_BIT_EXACT', fmt, stats, flush=True)
 
 
-def preflight(model, target, capacity, prompt_count, decode_count, out):
+def preflight(model, target, capacity, prompt_count, decode_count, out, rows=1):
     cfg = T.config(target)
-    image = load_spec(model).image(cfg, capacity, rows=1, wformat='int4', head_format='int8', lookup=False)
+    image = load_spec(model).image(cfg, capacity, rows=rows, wformat='int4', head_format='int8', lookup=False)
     checks = []
     positions = sorted({0, min(3, prompt_count - 1), prompt_count - 1,
                         prompt_count, prompt_count + decode_count - 1})
@@ -111,39 +112,57 @@ def preflight(model, target, capacity, prompt_count, decode_count, out):
             counts = [len(p) for p in image.compile_rows([(0, position)], head)]
             checks.append({'position': position, 'kind': 'rows_head' if head else 'rows_no_head',
                            'instructions': counts})
+    if rows > 1:
+        for position in sorted({0, rows, max(0, prompt_count-rows)}):
+            n = min(rows, prompt_count-position)
+            if n <= 0:
+                continue
+            for heads in ([], [n-1]):
+                counts = [len(p) for p in image.compile_rows([(0, position+j) for j in range(n)], heads)]
+                checks.append({'position': position, 'kind': 'grouped_rows', 'rows': n, 'instructions': counts})
     if any(max(c['instructions']) * 8 > cfg.IMEM_WORDS for c in checks):
         raise RuntimeError('At least one program exceeds the target instruction memory')
     if 0x10000000 + image.nbytes + cfg.IMEM_WORDS * 4 >= 0x80000000:
         raise RuntimeError('Image and programs exceed the physical DDR window')
     result = {'target': target, 'config': asdict(cfg), 'capacity': capacity,
-              'prefill': prompt_count, 'decode': decode_count, 'image_bytes': image.nbytes,
+              'prefill': prompt_count, 'decode': decode_count, 'prefill_rows': rows, 'image_bytes': image.nbytes,
               'compiled_programs': checks, 'passed': True}
     save(out / 'preflight.json', result)
     print('PREFLIGHT_PASS', image.nbytes, 'bytes, max instructions',
           max(max(c['instructions']) for c in checks), flush=True)
 
 
-def forward_prefill(eng, ids, progress, compile_ahead=False):
+def forward_prefill(eng, ids, progress, compile_ahead=False, rows=1):
+    def run_inputs(position):
+        end = min(position + rows, len(ids))
+        return ([(0, j) for j in range(position, end)],
+                [int(t) for t in ids[position:end]], [end-position-1] if end == len(ids) else [])
+    def completed(position, elapsed):
+        end = min(position + rows, len(ids))
+        eng.pos = end
+        if rows == 1:
+            progress(end-1, elapsed)
+        else:
+            progress(end-1, elapsed, end-position)
     if compile_ahead:
         from concurrent.futures import ThreadPoolExecutor
         eng._drain()
         def compile_row(position):
-            programs = eng.image.compile_rows([(0, position)],
-                [0] if position == len(ids) - 1 else [], eng.block,
-                **eng._tokens_kw([int(ids[position])]))
+            positions, tokens, heads = run_inputs(position)
+            programs = eng.image.compile_rows(positions, heads, eng.block, **eng._tokens_kw(tokens))
             prepare = getattr(eng.backend, 'prepare', None)
             if prepare is not None:
                 prepare(programs)
             return programs
         with ThreadPoolExecutor(1, thread_name_prefix='zu3eg-prefill') as pool:
             pending = pool.submit(compile_row, 0)
-            for position, token in enumerate(ids):
+            for position in range(0, len(ids), rows):
                 begin = time.monotonic()
                 programs = pending.result()
                 def started():
                     nonlocal pending
-                    if position + 1 < len(ids):
-                        pending = pool.submit(compile_row, position + 1)
+                    if position + rows < len(ids):
+                        pending = pool.submit(compile_row, position + rows)
                     else:
                         eng._prefetch(len(ids))
                 asynchronous = hasattr(eng.backend, 'start')
@@ -151,27 +170,26 @@ def forward_prefill(eng, ids, progress, compile_ahead=False):
                     eng.backend.on_started = started
                 else:
                     started()
-                logits = eng._run_rows([(0, position)], [int(token)],
-                    [0] if position == len(ids) - 1 else [], programs)
+                positions, tokens, heads = run_inputs(position)
+                logits = eng._run_rows(positions, tokens, heads, programs)
                 if asynchronous:
                     eng.backend.on_started = None
-                eng.pos = position + 1
-                progress(position, time.monotonic() - begin)
+                completed(position, time.monotonic() - begin)
         if not np.isfinite(logits).all():
             raise RuntimeError('Nonfinite prefill logits')
         return logits[0]
-    for position, token in enumerate(ids):
+    for position in range(0, len(ids), rows):
         begin = time.monotonic()
-        logits = eng.run_rows([(0, position)], [int(token)], [0] if position == len(ids) - 1 else [])
-        eng.pos = position + 1
-        progress(position, time.monotonic() - begin)
+        positions, tokens, heads = run_inputs(position)
+        logits = eng.run_rows(positions, tokens, heads)
+        completed(position, time.monotonic() - begin)
     if not np.isfinite(logits).all():
         raise RuntimeError('Nonfinite prefill logits')
     return logits[0]
 
 
 def reference_run(options, ids, request_id, tokenizer):
-    eng = engine(options.model, options.out, 'isa', options.target, options.capacity)
+    eng = engine(options.model, options.out, 'isa', options.target, options.capacity, rows=options.prefill_rows)
     begin = time.monotonic()
     try:
         def progress(position, elapsed):
@@ -238,6 +256,8 @@ def main():
     parser.add_argument('--target', default=DEFAULT_TARGET)
     parser.add_argument('--hardware', type=Path, default=DEPLOY / 'hardware')
     parser.add_argument('--prefill', type=int, default=PREFILL)
+    parser.add_argument('--prefill-rows', type=int, choices=(1, 2, 4), default=1,
+                        help='consecutive prompt tokens per run; reuses weights across activation rows')
     parser.add_argument('--decode', type=int, default=DECODE, help='additional forward/argmax steps after the prefill seed')
     parser.add_argument('--capacity', type=int, default=CAPACITY)
     parser.add_argument('--prompt-file', type=Path, default=ROOT / 'tools/data/austen_pp_ch1.txt')
@@ -271,14 +291,16 @@ def main():
     os.environ.pop('OTPU_FORMATS', None)
     os.environ.setdefault('OTPU_BUILD_JOBS', '1')
     cfg = T.config(options.target)
+    if options.prefill_rows > cfg.act_rows:
+        parser.error('--prefill-rows exceeds the target activation-row storage')
     if options.preflight:
-        preflight(options.model, options.target, options.capacity, options.prefill, options.decode, options.out)
+        preflight(options.model, options.target, options.capacity, options.prefill, options.decode, options.out, options.prefill_rows)
         return
     if options.prepare:
         class Prepared:
             def __init__(self, cfg, images):
                 self.images = images
-        eng = engine(options.model, options.out, Prepared, options.target, options.capacity)
+        eng = engine(options.model, options.out, Prepared, options.target, options.capacity, rows=options.prefill_rows)
         print('MODEL_IMAGE_PREPARED', eng.image.nbytes, flush=True)
         eng._drain()
         return
@@ -287,7 +309,7 @@ def main():
     ids = tokenizer(options.prompt_file.read_text(), add_special_tokens=False).input_ids[:options.prefill]
     if len(ids) != options.prefill:
         raise ValueError('Prompt file contains fewer tokens than --prefill')
-    request_id = digest({'layout': model_layout(options.model, options.target, options.capacity),
+    request_id = digest({'layout': model_layout(options.model, options.target, options.capacity, options.prefill_rows),
                          'prompt_ids': ids, 'decode_steps': options.decode})
     if options.reference_only:
         reference_run(options, ids, request_id, tokenizer)
@@ -347,7 +369,8 @@ def main():
                    'data_transport': options.data_transport,
                    'run_control': options.run_control, 'compile_ahead': options.compile_ahead,
                    'memory_stats_version': 1 if options.memory_stats else None,
-                   'prefill_method': 'one row per run; LM head on final row only',
+                   'prefill_rows': options.prefill_rows,
+                   'prefill_method': f'up to {options.prefill_rows} rows per run; LM head on final row only',
                    'decode_method': 'README perf.py: seed from prefill, then N forward/argmax steps'}
         save(options.out / 'request.json', request)
         setup = time.monotonic()
@@ -357,7 +380,8 @@ def main():
             backend = EthernetBackend
         eng = engine(options.model, options.out,
                      lambda c, images: backend(c, images, link, verify=False, upload=not options.preloaded),
-                     options.target, options.capacity, pipeline='thread' if options.compile_ahead else False)
+                     options.target, options.capacity, pipeline='thread' if options.compile_ahead else False,
+                     rows=options.prefill_rows)
         request.update(setup_wall_seconds=time.monotonic() - setup, image_bytes=eng.image.nbytes)
         if options.preloaded:
             loaded['pristine'] = False
@@ -366,8 +390,9 @@ def main():
             link.reset()
         steps, generated = [], []
         begin = time.monotonic()
-        def progress(position, elapsed):
-            row = {'phase': 'prefill', 'position': position, 'cycles': eng.stats[-1]['cycles'], 'wall_seconds': elapsed}
+        def progress(position, elapsed, count=1):
+            row = {'phase': 'prefill', 'position': position, 'tokens': count,
+                   'cycles': eng.stats[-1]['cycles'], 'wall_seconds': elapsed}
             if options.profile:
                 row['profile'] = link.take(elapsed, row['cycles'], khz * 1000)
             if options.memory_stats:
@@ -375,7 +400,7 @@ def main():
             steps.append(row)
             save(options.out / 'progress.json', request | {'complete': False, 'steps': steps})
             print(f'BOARD prefill {position+1}/{len(ids)}: {row["cycles"]} cycles, {elapsed:.3f} wall s', flush=True)
-        logits = forward_prefill(eng, ids, progress, options.compile_ahead)
+        logits = forward_prefill(eng, ids, progress, options.compile_ahead, options.prefill_rows)
         prefill_wall = time.monotonic() - begin
         logits.astype('<f4').tofile(options.out / 'prefill_logits.bin')
         seed = token = int(np.argmax(logits))

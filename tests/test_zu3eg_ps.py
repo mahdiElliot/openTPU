@@ -59,7 +59,9 @@ def test_ps_bridge_combines_reads_and_keeps_sixteen_bursts_pending(depth, width)
 
 @pytest.mark.parametrize("target,fmt", [("mys-zu3eg:d128-m1", "int8"),
                                         ("mys-zu3eg:d128-m1", "int4"),
-                                        ("mys-zu3eg:d64-m2", "int4")])
+                                        ("mys-zu3eg:d64-m2", "int4"),
+                                        ("mys-zu3eg:d128-m1-r4", "int8"),
+                                        ("mys-zu3eg:d128-m1-r4", "int4")])
 @pytest.mark.parametrize('combined', [False, True])
 def test_ps_board_kernel_matches_isa(tmp_path, target, fmt, combined):
     import sys
@@ -76,7 +78,7 @@ def test_ps_board_kernel_matches_isa(tmp_path, target, fmt, combined):
     from test_kernels import mlp_args
 
     cfg = replace(T.config(target), DRAM_BYTES=1 << 20)
-    arguments, _ = mlp_args(np.random.default_rng(42), M=1, H=128, Fd=256)
+    arguments, _ = mlp_args(np.random.default_rng(42), M=4 if cfg.ACT_ROWS == 4 else 1, H=128, Fd=256)
     for value in arguments.values():
         if isinstance(value, Weight):
             value.fmt = fmt

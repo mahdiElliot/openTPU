@@ -242,6 +242,46 @@ def test_memory_counter_version_and_cycle_bounds(words, cycles, valid):
             memory_statistics(Link(), cycles)
 
 
+@pytest.mark.parametrize('ahead', [False, True])
+def test_grouped_prefill_keeps_partial_tail_and_final_head(ahead):
+    from tools.zu3eg.run_board import forward_prefill
+
+    class Image:
+        def compile_rows(self, positions, heads, block=None):
+            return [(positions, heads)]
+    class Backend:
+        on_started = None
+        def start(self):
+            pass
+        def prepare(self, programs):
+            pass
+    class Engine:
+        image, backend, block, pos = Image(), Backend(), 128, 0
+        calls, prefetched = [], []
+        def _drain(self):
+            pass
+        def _tokens_kw(self, tokens):
+            return {}
+        def _prefetch(self, position):
+            self.prefetched.append(position)
+        def _run_rows(self, positions, tokens, heads, programs):
+            assert programs == [(positions, heads)]
+            assert [p for _, p in positions] == tokens
+            self.calls.append((positions, heads))
+            if self.backend.on_started:
+                self.backend.on_started()
+            return np.array([[tokens[h], tokens[h]+1] for h in heads], dtype=np.float32).reshape(-1, 2)
+        def run_rows(self, positions, tokens, heads):
+            return self._run_rows(positions, tokens, heads, self.image.compile_rows(positions, heads))
+    eng = Engine()
+    progress = []
+    logits = forward_prefill(eng, list(range(10)), lambda p, t, n: progress.append((p, n)), ahead, rows=4)
+    assert progress == [(3, 4), (7, 4), (9, 2)]
+    assert [heads for _, heads in eng.calls] == [[], [], [1]]
+    assert logits.tolist() == [9, 10] and eng.pos == 10
+    assert eng.prefetched == ([10] if ahead else [])
+
+
 @pytest.mark.parametrize('keep_running', [False, True])
 @pytest.mark.parametrize('verify_only', [False, True])
 def test_model_loader_keeps_monitor_alive_only_when_requested(tmp_path, monkeypatch, keep_running, verify_only):
