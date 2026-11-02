@@ -1,9 +1,9 @@
 // Complete board-control, loader, core and PS-memory-path ISA comparison.
 module tb_ps_core #(
   parameter int D = 128, MCOLS = 1, ACT_BLOCKS = 48, ACT_ROWS = 1, MXU_E = 1,
-                AXI_DATA_WIDTH = 256, READ_DEPTH = 8, READ_CHUNKS = 1
+                AXI_DATA_WIDTH = 256, READ_DEPTH = 8, READ_CHUNKS = 1, WORDS = 1 << 18,
+                TMEM_NSB = 2, TMEM_SBH = 0
 );
-  localparam int WORDS = 1 << 18;
   logic clk = 0, aresetn = 0, dump = 0;
   always #5 clk = !clk;
   logic [39:0] m_axi_awaddr;
@@ -63,9 +63,26 @@ module tb_ps_core #(
   otpu_zu3eg_accel #(.D(D), .MCOLS(MCOLS), .ACT_BLOCKS(ACT_BLOCKS),
                       .ACT_ROWS(ACT_ROWS), .MXU_E(MXU_E), .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
                       .MEMORY_STATS(1), .BRIDGE_READ_DEPTH(READ_DEPTH),
+                      .TMEM_NSB(TMEM_NSB), .TMEM_SBH(TMEM_SBH),
                       .BRIDGE_B_DEPTH(READ_DEPTH > 8 ? READ_DEPTH : 8),
                       .BRIDGE_READ_CHUNKS(READ_CHUNKS)) dut (.*);
   int expected_pressure = 0, expected_starve = 0, expected_either = 0;
+  int profile_mxu = 0, profile_vpu = 0, profile_dma = 0, profile_quant = 0;
+  int profile_mxu_vpu = 0, profile_dma_vpu = 0;
+  int profile_vpu_deny = 0, profile_vpu_replay = 0, profile_quant_deny = 0;
+  always @(posedge clk) if (dut.run && !dut.halted) begin
+    bit mb, vb, db;
+    mb = dut.u_core.u_slice.u_seq.uq_h[otpu_pkg::U_MXU] != dut.u_core.u_slice.u_seq.uq_t[otpu_pkg::U_MXU];
+    vb = dut.u_core.u_slice.u_seq.uq_h[otpu_pkg::U_VPU] != dut.u_core.u_slice.u_seq.uq_t[otpu_pkg::U_VPU];
+    db = dut.u_core.u_slice.u_seq.uq_h[otpu_pkg::U_DMA] != dut.u_core.u_slice.u_seq.uq_t[otpu_pkg::U_DMA];
+    profile_mxu += int'(mb); profile_vpu += int'(vb); profile_dma += int'(db);
+    profile_quant += int'(dut.u_core.u_slice.u_seq.uq_h[otpu_pkg::U_Q] != dut.u_core.u_slice.u_seq.uq_t[otpu_pkg::U_Q]);
+    profile_mxu_vpu += int'(mb && vb); profile_dma_vpu += int'(db && vb);
+    profile_vpu_deny += int'(dut.u_core.u_slice.lose_vpu);
+    profile_vpu_replay += int'(dut.u_core.u_slice.tm_lost[dut.u_core.u_slice.P_VA] ||
+                              dut.u_core.u_slice.tm_lost[dut.u_core.u_slice.P_VB]);
+    profile_quant_deny += int'(dut.u_core.u_slice.lose_q);
+  end
   logic previous_active = 0, previous_pressure = 0, previous_starve = 0;
   always @(posedge clk) begin
     if (previous_active) begin
@@ -148,6 +165,9 @@ module tb_ps_core #(
     release dut.u_core.u_slice.u_tmem.dump;
     repeat (4) @(negedge clk);
     $display("PS_CORE_PASS cycles=%0d max_reads=%0d", cycles, memory_model.max_read_pending);
+    $display("COMPUTE_PROFILE mxu=%0d vpu=%0d dma=%0d quant=%0d mxu_vpu=%0d dma_vpu=%0d vpu_deny=%0d vpu_replay=%0d quant_deny=%0d",
+      profile_mxu, profile_vpu, profile_dma, profile_quant, profile_mxu_vpu, profile_dma_vpu,
+      profile_vpu_deny, profile_vpu_replay, profile_quant_deny);
     $finish;
   end
   initial begin #100000000; $fatal(1, "timeout"); end

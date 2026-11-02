@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -2090,8 +2091,10 @@ def _deltanet_rows(x, lw, p0: int, spec: Spec, gr, on, fork: bool = False, xs=No
 
     # a pair's projections, taps and ring rows; two sets with DSTEP (pair p + 1's projections
     # stream while pair p's DSTEPs run)
-    NB = 2 if dstep and split and gp == 2 else 1
-    taps1 = ol.empty([K * CP]) if NB == 2 else None     # (_rows_pipelined: one taps buffer)
+    vop_overlap = (not dstep and split and gp == 2 and not fork and R <= 4 and
+                   os.environ.get('OTPU_Q35_ROWS_OVERLAP', '0') == '1')
+    NB = 2 if (dstep and split and gp == 2) or vop_overlap else 1
+    taps1 = ol.empty([K * CP]) if NB == 2 and dstep else None
     PB = [(ol.empty([K * CP]) if taps1 is None else taps1, ol.empty([K - 1 + R, CP]),
            ol.empty([R, 2 * dv])) for _ in range(NB)]
 
@@ -2278,12 +2281,34 @@ def _deltanet_rows(x, lw, p0: int, spec: Spec, gr, on, fork: bool = False, xs=No
         for p in range(1 + 2 * n_it, NP):
             unrolled(p)
 
-    if NB == 2:
+    if NB == 2 and dstep:
         _rows_pipelined()
         return x + ol.all_reduce(y)
     ONp = ol.empty([R, 2 * dv])                         # normed, gated o of a pair per row
     GDB = ol.empty([R, 4])                              # decays, then betas, of the pair's heads
     GD, GB = GDB[:, 0:2], GDB[:, 2:4]
+    if vop_overlap:
+        # A pair's projections use a different output buffer from the pair
+        # whose recurrent state the VPU updates. Delay its window stores:
+        # a store waiting for an MM must not hold the DMA ahead of state loads.
+        # The final out_proj still accumulates in the original head-group order.
+        project((0, 0), 0, window=False)
+        for g in loop(ng - 1):
+            project((g, 1), 1, window=False)
+            heads((g, 0), 0)
+            store_window((g, 0), 0)
+            ol.store(on[:, 0:2 * dv], ONp)
+            project((g + 1, 0), 0, window=False)
+            heads((g, 1), 1)
+            store_window((g, 1), 1)
+            ol.store(on[:, 2 * dv:4 * dv], ONp)
+            flush(g, ol.load(on), 0, og)
+        project((ng - 1, 1), 1, window=False)
+        for q in range(gp):
+            heads((ng - 1, q), q)
+            store_window((ng - 1, q), q)
+            flush(ng - 1, ONp, 2 * q, 2 * q + 2)
+        return x + ol.all_reduce(y)
     for g in loop(ng - 1 if split else ng):             # whole groups
         if gp == 1:
             pair(g)

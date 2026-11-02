@@ -307,11 +307,13 @@ def test_tiny_chunked_prefill_is_bit_exact(tiny, config, first, chunk, dstep):
     assert all(np.array_equal(eng.step(t), w) for t, w in zip(toks[17:], want[17:]))
 
 
-def test_one_column_int4_prefill_reuses_four_rows_bit_exact(tiny):
+@pytest.mark.parametrize('overlap', [False, True])
+def test_one_column_int4_prefill_reuses_four_rows_bit_exact(tiny, monkeypatch, overlap):
     """128x1 PEs replay weight tiles for four prompt rows; recurrent state is unchanged."""
     from dataclasses import replace
     from opentpu import target as T
     from tools.zu3eg.run_board import forward_prefill
+    monkeypatch.setenv('OTPU_Q35_ROWS_OVERLAP', str(int(overlap)))
     _, weights, spec = tiny
     cfg = replace(T.config('mys-zu3eg:d128-m1-r4'), DRAM_BYTES=1 << 25)
     options = dict(cfg=cfg, cap=256, rows=4, wformat='int4', head_format='int8',

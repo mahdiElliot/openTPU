@@ -268,6 +268,8 @@ def main():
                         help='run/start/wait control path; Ethernet requires --data-transport ethernet')
     parser.add_argument('--compile-ahead', action='store_true',
                         help='compile the next prefill/decode program while the FPGA executes')
+    parser.add_argument('--compute-overlap', action='store_true',
+                        help='double-buffer Qwen3.5 prompt projections to overlap MXU and VPU work')
     parser.add_argument('--profile', action='store_true',
                         help='record per-step host, transfer, control and FPGA timings')
     parser.add_argument('--memory-stats', action='store_true',
@@ -280,6 +282,8 @@ def main():
     parser.add_argument('--preloaded', action='store_true')
     parser.add_argument('--verify-isa', action='store_true')
     options = parser.parse_args()
+    if options.compute_overlap:
+        os.environ['OTPU_Q35_ROWS_OVERLAP'] = '1'
     if options.run_control == 'ethernet' and options.data_transport != 'ethernet':
         parser.error('--run-control ethernet requires --data-transport ethernet')
     if min(options.prefill, options.decode) < 1 or options.prefill + options.decode > options.capacity:
@@ -368,6 +372,7 @@ def main():
                                  'physical JTAG to PS DDR and AXI-Lite controls'),
                    'data_transport': options.data_transport,
                    'run_control': options.run_control, 'compile_ahead': options.compile_ahead,
+                   'compute_overlap': os.environ.get('OTPU_Q35_ROWS_OVERLAP', '0') == '1',
                    'memory_stats_version': 1 if options.memory_stats else None,
                    'prefill_rows': options.prefill_rows,
                    'prefill_method': f'up to {options.prefill_rows} rows per run; LM head on final row only',

@@ -91,3 +91,14 @@ ACT_BLOCKS = 48
 ACT_ROWS = 4
 PAIR = false
 MXU_E = 1
+
+# Four hashed scratchpad sub-banks reduce replay collisions; arithmetic unchanged.
+[variants.d128-m1-r4-tmem4]
+D = 128
+MCOLS = 1
+ACT_BLOCKS = 48
+ACT_ROWS = 4
+PAIR = false
+MXU_E = 1
+TMEM_NSB = 4
+TMEM_SBH = 1
