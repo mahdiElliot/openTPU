@@ -6,6 +6,10 @@ Qwen3.5-0.8B uses **int4 decoder weights and an int8 LM head**, with **128 input
 tokens and 16 decode steps**. JTAG programs and controls the accelerator. Ethernet can transfer the model,
 inference inputs, programs and output logits; a JTAG data path is also available.
 
+For terminal chat using the newer four-row weight-reuse build on this PC, see
+[section 15C](#15c-interactive-chat-over-ethernet). That section supplies its
+own hardware and model paths; sections 1–14 retain the original one-row profile.
+
 ## 1. Selected configuration and validation
 
 | Setting | Value |
@@ -553,10 +557,10 @@ including the seed, consistently use `--decode 15` for reference and board runs.
 The result records `data_transport` and a transport description. Selecting
 Ethernet for model loading alone does not select Ethernet inference: use the
 explicit `--data-transport ethernet` flag in 15A. Wait for the command to
-finish before reading the log, or inspect progress with:
+finish before reading the log:
 
 ```bash
-tail -f "$DEPLOY/board_run.log"
+tail -n 80 "$DEPLOY/board_run.log"
 ```
 
 Success prints `BOARD_REQUEST_ISA_BIT_EXACT`. The runner marks the loaded
@@ -564,6 +568,93 @@ image used; before another request, restore initial KV and recurrent state by
 repeating the selected model-loading method. For Ethernet inference, reload
 with `--keep-running`; restart the monitor first only if it has stopped.
 Reprogramming PL alone does not reset model state.
+
+### 15C. Interactive chat over Ethernet
+
+Use `tools.zu3eg.chat_board` for this MYIR connection. The generic
+`otpu-chat --backend board` command targets the PCIe/XDMA board instead.
+Chat uses the checkpoint's chat template, greedy sampling, thinking disabled,
+and EOS stopping. Input/program/logit transfers and run control use Ethernet;
+JTAG remains connected for startup checks.
+
+The commands below reuse the four-row image and qualified hardware already
+built on this PC: **128 x 1 PEs, 177.5/332.8125 MHz, four activation rows,
+16 outstanding reads and up to 512-byte read bursts**. They require the
+existing prepared model, manifests and matching int8/int4 kernel-check records.
+Activate the environment and override the older paths from section 5:
+
+```bash
+cd /home/mahdi/Documents/brochrue/project/openTPU
+source .venv/bin/activate
+
+export HF_HOME="$PWD/build/zu3eg/hf-cache"
+export HF_HUB_OFFLINE=1
+export OMP_NUM_THREADS=2
+export MKL_NUM_THREADS=2
+export TARGET='mys-zu3eg:d128-m1-r4'
+export DEPLOY="$PWD/build/zu3eg/prefill_reuse_20261102"
+export HW="$DEPLOY/hardware_checked"
+export RUN="$DEPLOY/full/run"
+export ETH_WORK="$PWD/build/zu3eg/wide_128_16/ethernet/workspace"
+```
+
+**Start at model loading (section 14B)** if the correct accelerator and Ethernet
+monitor are still running after your successful benchmark. No rebuild or new
+ISA reference is needed. If the board was rebooted, reprogrammed, or the monitor
+is stopped, first complete sections 10–11 with the paths above, then boot it:
+
+```bash
+python -u -m tools.zu3eg.program_board \
+  --hardware "$HW" --out "$DEPLOY/bringup"
+nmcli connection up opentpu-direct
+python -u -m tools.zu3eg.boot_ethernet --workspace "$ETH_WORK" \
+  --out "$DEPLOY/boot" --reset-apu
+ping -I enp45s0 -c 3 192.168.200.2
+```
+
+Reload the initial image **before every new chat-process launch**, including
+after a benchmark or a previous chat session. Keep the monitor running:
+
+```bash
+python -u -m tools.zu3eg.load_ethernet \
+  --hardware "$HW" --image "$RUN/model_image.bin" \
+  --address 192.168.200.2 --keep-running \
+  > "$DEPLOY/load_chat.log" 2>&1
+```
+
+Wait for this process to finish successfully, then read its log and confirm
+`ETHERNET_FULL_DDR_SHA256_PASS`. Do not run kernels after loading. Now start
+the interactive terminal directly, without redirecting its output:
+
+```bash
+python -u -m tools.zu3eg.chat_board \
+  --hardware "$HW" --run "$RUN" \
+  --address 192.168.200.2 --max-new 64
+```
+
+Type a question at `You>`. Replies stream to the terminal. `/reset` clears the
+conversation; `/quit` or `/exit` ends the process. The session loads weights
+once; between turns it clears recurrent state and replays the templated history
+using four-row prefill, preserving Qwen3.5's state dependencies.
+
+The **256-token capacity includes chat formatting, all conversation history,
+and the reserved reply length**. With `--max-new 64`, the templated prompt must
+fit within 192 tokens. If the context fills, use `/reset`, shorten the question,
+or restart with a smaller `--max-new` after reloading. Chat does not pad or
+truncate prompts to the benchmark's 128 tokens and does not force 16 outputs.
+
+For a single question, reload the image first and use:
+
+```bash
+python -u -m tools.zu3eg.chat_board \
+  --hardware "$HW" --run "$RUN" --max-new 64 \
+  --prompt "Explain why the sky is blue in simple terms."
+```
+
+Each reply prints time to first token, decode steps/s and end-to-end output
+tokens/s. The terminal chat entry point has focused host tests, but has not yet
+been validated on the physical board; the four-row benchmark hardware and
+sequential-reference comparisons were validated separately.
 
 ## 16. Read verification and performance results
 
