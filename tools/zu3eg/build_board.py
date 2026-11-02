@@ -7,22 +7,25 @@ from pathlib import Path
 
 from opentpu import target as T
 
-ROOT = Path(__file__).resolve().parents[2]
+from .settings import AXI_DATA_WIDTH, CORE_MHZ, DEPLOY, MEM_MHZ, ROOT, TARGET
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--out', type=Path, default=ROOT / 'build/zu3eg/deployment512_16/hardware')
+    parser.add_argument('--out', type=Path, default=DEPLOY / 'hardware')
     parser.add_argument('--vivado', default='/home/mahdi/vivado/Vivado/2022.2/bin/vivado')
     parser.add_argument('--loader', action='store_true', help='build a temporary JTAG-to-AXI DDR loader')
-    parser.add_argument('--target', default='mys-zu3eg:d128-m1')
-    parser.add_argument('--core-mhz', type=float, default=112.5)
-    parser.add_argument('--mem-mhz', type=float, help='HP AXI clock, default: core clock; physical DDR is unchanged')
+    parser.add_argument('--target', default=TARGET)
+    parser.add_argument('--core-mhz', type=float, default=CORE_MHZ)
+    parser.add_argument('--mem-mhz', type=float, default=MEM_MHZ,
+                        help='HP AXI clock; physical DDR is unchanged')
+    parser.add_argument('--axi-data-width', type=int, choices=(128, 256), default=AXI_DATA_WIDTH,
+                        help='bridge AXI width; downsizing to the 128-bit HP port runs at the HP clock')
     parser.add_argument('--prepare-only', action='store_true', help='write build parameters without starting Vivado')
     options = parser.parse_args()
     out = options.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
-    mem_mhz = options.core_mhz if options.mem_mhz is None else options.mem_mhz
+    mem_mhz = options.mem_mhz
     if any(not math.isfinite(f) or not 0 < f <= 333 for f in (options.core_mhz, mem_mhz)):
         parser.error('core and HP AXI clocks must be positive and at most 333 MHz')
     target = T.load(options.target)
@@ -44,9 +47,9 @@ def main():
         'FIFO_DEPTH', 'LANES', 'WIN', 'MXU_CL', 'MXU_E', 'VPU_CL', 'ULANES',
         'RPB', 'WPB', 'TMEM_NSB', 'TMEM_SBP', 'TMEM_SBH', 'TMEM_RPL', 'TMEM_TDP',
         'TMEM_GST', 'TMEM_PMP', 'TMEM_PRK', 'TMEM_SDM') if k in T.rtl_params(target)}
-    parameters.update(CORE_KHZ=round(options.core_mhz * 1000), ARCH_HASH=T.arch_hash(cfg))
+    parameters.update(AXI_DATA_WIDTH=options.axi_data_width, CORE_KHZ=round(options.core_mhz * 1000), ARCH_HASH=T.arch_hash(cfg))
     (out / 'build_params.tcl').write_text(
-        f'set core_mhz {options.core_mhz}\nset mem_mhz {mem_mhz}\n' +
+        f'set core_mhz {options.core_mhz}\nset mem_mhz {mem_mhz}\nset axi_data_width {options.axi_data_width}\n' +
         'set accelerator_parameters {' + ' '.join(
             f'CONFIG.{k} {int(v)}' for k, v in parameters.items()) + '}\n')
     metadata = target.to_dict() | {
@@ -54,7 +57,9 @@ def main():
         'dual_clock': mem_mhz != options.core_mhz, 'rtl_parameters': parameters,
         'ps_pl0_input_mhz': 100, 'control_base': '0x80000000',
         'ddr_base': '0x10000000', 'ps_boot': 'preserve existing initialized PS DDR; PL-only programming',
-        'memory_bridge': 'single outstanding 128-bit AXI HP0, 32-byte scale-line cache'}
+        'memory_bridge': f'queued {options.axi_data_width}-bit bridge, 128-bit HP0, up to 8 reads outstanding, independent writes, 32-byte scale-line cache',
+        'bridge_axi_bits': options.axi_data_width, 'hp_axi_bits': 128,
+        'width_conversion_clock': 'HP AXI' if options.axi_data_width != 128 else 'none'}
     if options.loader:
         metadata = {'purpose': 'temporary DDR bulk loader; no accelerator core',
                     'part': 'xczu3eg-sfvc784-1-i', 'clock_mhz': 112.5,

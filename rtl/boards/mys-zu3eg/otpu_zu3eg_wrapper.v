@@ -1,6 +1,7 @@
 // Verilog module-reference boundary for Vivado IP Integrator.
 module otpu_zu3eg_wrapper #(
   parameter integer D = 128,
+  parameter integer AXI_DATA_WIDTH = 256,
   parameter integer MCOLS = 1,
   parameter integer ACT_BLOCKS = 48,
   parameter integer ACT_ROWS = 1,
@@ -56,9 +57,9 @@ module otpu_zu3eg_wrapper #(
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI AWREADY" *)
   input wire m_axi_awready,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI WDATA" *)
-  output wire [127:0] m_axi_wdata,
+  output wire [AXI_DATA_WIDTH-1:0] m_axi_wdata,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI WSTRB" *)
-  output wire [15:0] m_axi_wstrb,
+  output wire [AXI_DATA_WIDTH/8-1:0] m_axi_wstrb,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI WLAST" *)
   output wire m_axi_wlast,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI WVALID" *)
@@ -96,7 +97,7 @@ module otpu_zu3eg_wrapper #(
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARREADY" *)
   input wire m_axi_arready,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RDATA" *)
-  input wire [127:0] m_axi_rdata,
+  input wire [AXI_DATA_WIDTH-1:0] m_axi_rdata,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RID" *)
   input wire [5:0] m_axi_rid,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RRESP" *)
@@ -143,6 +144,7 @@ module otpu_zu3eg_wrapper #(
   input wire s_axi_rready
 );
   otpu_zu3eg_accel #(
+    .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
     .D(D),
     .MCOLS(MCOLS),
     .ACT_BLOCKS(ACT_BLOCKS),

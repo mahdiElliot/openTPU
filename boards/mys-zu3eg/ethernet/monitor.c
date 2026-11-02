@@ -60,9 +60,6 @@ static void response(uint32_t error, void *data, uint32_t bytes) {
 
 static void start_run(void) {
     Xil_Out32(CSR + 8, 4);
-    Xil_Out32(CSR + 0x10, address);
-    Xil_Out32(CSR + 0x14, remaining);
-    Xil_Out32(CSR + 8, 2);
     run_phase = 1;
     XTime_GetTime(&run_started);
 }
@@ -105,7 +102,17 @@ static int begin_request(void) {
 
 static err_t received(void *unused, struct tcp_pcb *pcb, struct pbuf *p, err_t error) {
     (void)unused; (void)error;
-    if (!p) {tcp_close(pcb); client = NULL; return ERR_OK;}
+    if (!p) {
+        if (client == pcb) {
+            if (run_phase) Xil_Out32(CSR + 8, 0);
+            client = NULL; transmit_bytes = 0; run_phase = 0;
+        }
+        tcp_arg(pcb, NULL); tcp_recv(pcb, NULL);
+        tcp_sent(pcb, NULL); tcp_err(pcb, NULL);
+        if (tcp_close(pcb) != ERR_OK) {tcp_abort(pcb); return ERR_ABRT;}
+        return ERR_OK;
+    }
+    if (pcb != client) {pbuf_free(p); tcp_abort(pcb); return ERR_ABRT;}
     for (struct pbuf *part = p; part; part = part->next) {
         const unsigned char *data = part->payload;
         unsigned available = part->len;
@@ -119,6 +126,9 @@ static err_t received(void *unused, struct tcp_pcb *pcb, struct pbuf *p, err_t e
             } else if (operation == 1) {
                 unsigned n = remaining < available ? remaining : available;
                 if (address < CSR) {
+                    // PL may have changed other bytes of a previously cached
+                    // line. Refresh it before a partial host input write.
+                    Xil_DCacheInvalidateRange(address, n);
                     memcpy((void *)(uintptr_t)address, data, n);
                     Xil_DCacheFlushRange(address, n);
                 } else {
@@ -146,11 +156,18 @@ static err_t received(void *unused, struct tcp_pcb *pcb, struct pbuf *p, err_t e
 }
 
 static err_t acknowledged(void *unused, struct tcp_pcb *pcb, u16_t bytes) {
-    (void)unused; (void)pcb; (void)bytes; pump(); return ERR_OK;
+    (void)unused; (void)bytes;
+    if (pcb == client) pump();
+    return ERR_OK;
 }
 
-static void disconnected(void *unused, err_t error) {
-    (void)unused; (void)error; client = NULL;
+static void disconnected(void *connection, err_t error) {
+    (void)error;
+    // A late error from an older PCB must not detach a newer connection.
+    if (client == connection) {
+        if (run_phase) Xil_Out32(CSR + 8, 0);
+        client = NULL; transmit_bytes = 0; run_phase = 0;
+    }
 }
 
 static err_t accepted(void *unused, struct tcp_pcb *pcb, err_t error) {
@@ -159,6 +176,7 @@ static err_t accepted(void *unused, struct tcp_pcb *pcb, err_t error) {
     if (client) {tcp_abort(pcb); return ERR_ABRT;}
     client = pcb; header_bytes = 0; operation = 0; run_phase = 0; transmit_bytes = 0;
     tcp_nagle_disable(pcb);
+    tcp_arg(pcb, pcb);
     tcp_recv(pcb, received); tcp_sent(pcb, acknowledged); tcp_err(pcb, disconnected);
     return ERR_OK;
 }
@@ -175,10 +193,14 @@ int transfer_data(void) {
         if ((status & 0x112) || now - run_started > 180ULL * COUNTS_PER_SECOND) {
             reply[0] = status;
             Xil_Out32(CSR + 8, 0); run_phase = 0; response(2, reply, 4);
-        } else if (run_phase == 1 && !(status & 4)) {
+        } else if (run_phase == 1 && (status & 8)) {
+            Xil_Out32(CSR + 0x10, address);
+            Xil_Out32(CSR + 0x14, remaining);
+            Xil_Out32(CSR + 8, 2); run_phase = 2;
+        } else if (run_phase == 2 && !(status & 4)) {
             for (unsigned k = 0; k < 8; k++) Xil_Out32(CSR + 0x60 + 4 * k, arguments[k]);
-            Xil_Out32(CSR + 8, 5); run_phase = 2;
-        } else if (run_phase == 2 && (status & 9) == 9) {
+            Xil_Out32(CSR + 8, 5); run_phase = 3;
+        } else if (run_phase == 3 && (status & 9) == 9) {
             reply[0] = Xil_In32(CSR + 0x18); reply[1] = Xil_In32(CSR + 0x1c);
             reply[2] = Xil_In32(CSR + 0x20); reply[3] = status;
             Xil_Out32(CSR + 8, 0); run_phase = 0; response(0, reply, 16);

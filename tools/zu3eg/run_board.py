@@ -1,4 +1,4 @@
-"""Prepare, validate and run a configurable Qwen3.5 request on MYIR over JTAG."""
+"""Run Qwen3.5 on MYIR with JTAG control and JTAG or Ethernet DDR transfers."""
 from __future__ import annotations
 
 import argparse
@@ -20,7 +20,7 @@ from .evaluate import MODEL, ROOT
 from .jtag import CONTROL_BASE, Jtag, JtagBackend
 from .sequence import save
 
-DEFAULT_TARGET = 'mys-zu3eg:d128-m1'
+from .settings import CAPACITY, DECODE, DEPLOY, PREFILL, TARGET as DEFAULT_TARGET
 
 
 def digest(value):
@@ -41,7 +41,7 @@ def model_layout(model, target, capacity):
             'checkpoint': imgcache.checkpoint(model), 'source': progcache.source()}
 
 
-def engine(model, out, backend, target=DEFAULT_TARGET, capacity=1024):
+def engine(model, out, backend, target=DEFAULT_TARGET, capacity=CAPACITY, pipeline=False):
     cfg, spec = T.config(target), load_spec(model)
     layout = digest(model_layout(model, target, capacity))
 
@@ -67,7 +67,7 @@ def engine(model, out, backend, target=DEFAULT_TARGET, capacity=1024):
 
     with patch.object(imgcache, 'build', build):
         return Engine(spec, load_weights(model), cfg=cfg, cap=capacity, rows=1,
-                      backend=backend, pipeline=False, resident=False,
+                      backend=backend, pipeline=pipeline, resident=False,
                       wformat='int4', head_format='int8', prog_cache=False, snapshots=0)
 
 
@@ -123,7 +123,43 @@ def preflight(model, target, capacity, prompt_count, decode_count, out):
           max(max(c['instructions']) for c in checks), flush=True)
 
 
-def forward_prefill(eng, ids, progress):
+def forward_prefill(eng, ids, progress, compile_ahead=False):
+    if compile_ahead:
+        from concurrent.futures import ThreadPoolExecutor
+        eng._drain()
+        def compile_row(position):
+            programs = eng.image.compile_rows([(0, position)],
+                [0] if position == len(ids) - 1 else [], eng.block,
+                **eng._tokens_kw([int(ids[position])]))
+            prepare = getattr(eng.backend, 'prepare', None)
+            if prepare is not None:
+                prepare(programs)
+            return programs
+        with ThreadPoolExecutor(1, thread_name_prefix='zu3eg-prefill') as pool:
+            pending = pool.submit(compile_row, 0)
+            for position, token in enumerate(ids):
+                begin = time.monotonic()
+                programs = pending.result()
+                def started():
+                    nonlocal pending
+                    if position + 1 < len(ids):
+                        pending = pool.submit(compile_row, position + 1)
+                    else:
+                        eng._prefetch(len(ids))
+                asynchronous = hasattr(eng.backend, 'start')
+                if asynchronous:
+                    eng.backend.on_started = started
+                else:
+                    started()
+                logits = eng._run_rows([(0, position)], [int(token)],
+                    [0] if position == len(ids) - 1 else [], programs)
+                if asynchronous:
+                    eng.backend.on_started = None
+                eng.pos = position + 1
+                progress(position, time.monotonic() - begin)
+        if not np.isfinite(logits).all():
+            raise RuntimeError('Nonfinite prefill logits')
+        return logits[0]
     for position, token in enumerate(ids):
         begin = time.monotonic()
         logits = eng.run_rows([(0, position)], [int(token)], [0] if position == len(ids) - 1 else [])
@@ -184,14 +220,23 @@ def verify_reference(out, result):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--out', type=Path, default=ROOT / 'build/zu3eg/deployment512_16/run')
+    parser.add_argument('--out', type=Path, default=DEPLOY / 'run')
     parser.add_argument('--model', type=Path, default=MODEL)
     parser.add_argument('--target', default=DEFAULT_TARGET)
-    parser.add_argument('--hardware', type=Path, default=ROOT / 'build/zu3eg/deployment512_16/hardware')
-    parser.add_argument('--prefill', type=int, default=512)
-    parser.add_argument('--decode', type=int, default=16, help='additional forward/argmax steps after the prefill seed')
-    parser.add_argument('--capacity', type=int, default=1024)
+    parser.add_argument('--hardware', type=Path, default=DEPLOY / 'hardware')
+    parser.add_argument('--prefill', type=int, default=PREFILL)
+    parser.add_argument('--decode', type=int, default=DECODE, help='additional forward/argmax steps after the prefill seed')
+    parser.add_argument('--capacity', type=int, default=CAPACITY)
     parser.add_argument('--prompt-file', type=Path, default=ROOT / 'tools/data/austen_pp_ch1.txt')
+    parser.add_argument('--data-transport', choices=('jtag', 'ethernet'), default='jtag',
+                        help='transport for input/program uploads and logit reads')
+    parser.add_argument('--ethernet-address', default='192.168.200.2')
+    parser.add_argument('--run-control', choices=('jtag', 'ethernet'), default='jtag',
+                        help='run/start/wait control path; Ethernet requires --data-transport ethernet')
+    parser.add_argument('--compile-ahead', action='store_true',
+                        help='compile the next prefill/decode program while the FPGA executes')
+    parser.add_argument('--profile', action='store_true',
+                        help='record per-step host, transfer, control and FPGA timings')
     stages = parser.add_mutually_exclusive_group()
     stages.add_argument('--prepare', action='store_true')
     stages.add_argument('--preflight', action='store_true')
@@ -200,6 +245,8 @@ def main():
     parser.add_argument('--preloaded', action='store_true')
     parser.add_argument('--verify-isa', action='store_true')
     options = parser.parse_args()
+    if options.run_control == 'ethernet' and options.data_transport != 'ethernet':
+        parser.error('--run-control ethernet requires --data-transport ethernet')
     if min(options.prefill, options.decode) < 1 or options.prefill + options.decode > options.capacity:
         parser.error('positive counts with prefill + decode <= capacity are required')
     options.out = options.out.resolve()
@@ -235,6 +282,17 @@ def main():
         raise ValueError('Hardware and software target configurations differ')
     hardware_id = file_digest(options.hardware / 'opentpu_zu3eg.bit')
     link, eng = Jtag(options.out), None
+    if options.data_transport == 'ethernet':
+        from .ethernet import Ethernet, EthernetDataLink
+        try:
+            data = Ethernet(options.ethernet_address)
+        except Exception:
+            link.close()
+            raise
+        link = EthernetDataLink(link, data, run_control=options.run_control)
+    if options.profile:
+        from .profiling import ProfiledLink
+        link = ProfiledLink(link)
     try:
         version = (cfg.D << 16) | (cfg.MCOLS << 8) | cfg.LANES
         if link.words(CONTROL_BASE, 2) != [0x4f545055, version]:
@@ -268,26 +326,38 @@ def main():
                    'core_khz': khz, 'mem_mhz': hardware.get('mem_mhz', hardware['core_mhz']),
                    'prefill_tokens': ids, 'decode_steps': options.decode, 'request_id': request_id,
                    'context_capacity': options.capacity, 'weight_format': 'int4', 'head_format': 'int8',
-                   'transport': 'physical JTAG to PS DDR and AXI-Lite controls',
+                   'transport': (f'Ethernet DDR data (inputs, programs, logits); {options.run_control.upper()} run control'
+                                 if options.data_transport == 'ethernet' else
+                                 'physical JTAG to PS DDR and AXI-Lite controls'),
+                   'data_transport': options.data_transport,
+                   'run_control': options.run_control, 'compile_ahead': options.compile_ahead,
                    'prefill_method': 'one row per run; LM head on final row only',
                    'decode_method': 'README perf.py: seed from prefill, then N forward/argmax steps'}
         save(options.out / 'request.json', request)
         setup = time.monotonic()
+        backend = JtagBackend
+        if options.run_control == 'ethernet':
+            from .ethernet import EthernetBackend
+            backend = EthernetBackend
         eng = engine(options.model, options.out,
-                     lambda c, images: JtagBackend(c, images, link, verify=False, upload=not options.preloaded),
-                     options.target, options.capacity)
+                     lambda c, images: backend(c, images, link, verify=False, upload=not options.preloaded),
+                     options.target, options.capacity, pipeline='thread' if options.compile_ahead else False)
         request.update(setup_wall_seconds=time.monotonic() - setup, image_bytes=eng.image.nbytes)
         if options.preloaded:
             loaded['pristine'] = False
             save(options.out / 'model_loaded.json', loaded)
+        if options.profile:
+            link.reset()
         steps, generated = [], []
         begin = time.monotonic()
         def progress(position, elapsed):
             row = {'phase': 'prefill', 'position': position, 'cycles': eng.stats[-1]['cycles'], 'wall_seconds': elapsed}
+            if options.profile:
+                row['profile'] = link.take(elapsed, row['cycles'], khz * 1000)
             steps.append(row)
             save(options.out / 'progress.json', request | {'complete': False, 'steps': steps})
             print(f'BOARD prefill {position+1}/{len(ids)}: {row["cycles"]} cycles, {elapsed:.3f} wall s', flush=True)
-        logits = forward_prefill(eng, ids, progress)
+        logits = forward_prefill(eng, ids, progress, options.compile_ahead)
         prefill_wall = time.monotonic() - begin
         logits.astype('<f4').tofile(options.out / 'prefill_logits.bin')
         seed = token = int(np.argmax(logits))
@@ -299,8 +369,11 @@ def main():
                 raise RuntimeError('Nonfinite decode logits')
             token = int(np.argmax(logits))
             generated.append(token)
-            steps.append({'phase': 'decode', 'position': len(ids) + index,
-                          'cycles': eng.stats[-1]['cycles'], 'wall_seconds': time.monotonic() - step_begin, 'token': token})
+            row = {'phase': 'decode', 'position': len(ids) + index,
+                   'cycles': eng.stats[-1]['cycles'], 'wall_seconds': time.monotonic() - step_begin, 'token': token}
+            if options.profile:
+                row['profile'] = link.take(row['wall_seconds'], row['cycles'], khz * 1000)
+            steps.append(row)
             save(options.out / 'progress.json', request | {'complete': False, 'steps': steps, 'generated_tokens': generated})
             print(f'BOARD decode {index+1}/{options.decode}: {eng.stats[-1]["cycles"]} cycles, {tokenizer.decode([seed]+generated)!r}', flush=True)
         decode_wall, request_wall = time.monotonic() - decode_begin, time.monotonic() - begin

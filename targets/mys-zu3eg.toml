@@ -50,7 +50,7 @@ vendor = "xilinx"
 
 [platform]
 board = "mys-zu3eg"
-core_mhz = 50.0
+core_mhz = 177.5
 mem = "ps-ddr4"
 channels_per_slice = 1
 channel_bytes = 2147483648

@@ -44,23 +44,40 @@ connect_bd_net [get_bd_pins resets/peripheral_aresetn] [get_bd_pins accelerator/
   [get_bd_pins control/ARESETN] [get_bd_pins control/S00_ARESETN] [get_bd_pins control/M00_ARESETN]
 connect_bd_intf_net [get_bd_intf_pins ps/M_AXI_HPM0_LPD] [get_bd_intf_pins control/S00_AXI]
 connect_bd_intf_net [get_bd_intf_pins control/M00_AXI] [get_bd_intf_pins accelerator/S_AXI]
-if {$mem_mhz == $core_mhz} {
-  connect_bd_net [get_bd_pins clocks/clk_out1] [get_bd_pins ps/saxihp0_fpd_aclk]
-  connect_bd_intf_net [get_bd_intf_pins accelerator/M_AXI] [get_bd_intf_pins ps/S_AXI_HP0_FPD]
-} else {
+# Keep the wide stream across the crossing. Downsizing at the core clock
+# would leave a 128-bit/core-clock bandwidth bottleneck in front of HP0.
+set memory_axi [get_bd_intf_pins accelerator/M_AXI]
+set hp_clock [get_bd_pins clocks/clk_out1]
+set hp_reset [get_bd_pins resets/peripheral_aresetn]
+if {$mem_mhz != $core_mhz} {
   set mem_reset [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 memory_resets]
   set crossing [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_clock_converter:2.1 memory_clock_converter]
-  set_property -dict [list CONFIG.ACLK_ASYNC {1} CONFIG.SYNCHRONIZATION_STAGES {3}] $crossing
+  set_property -dict [list CONFIG.ACLK_ASYNC {1} CONFIG.SYNCHRONIZATION_STAGES {3} \
+    CONFIG.DATA_WIDTH $axi_data_width] $crossing
   connect_bd_net [get_bd_pins clocks/clk_out1] [get_bd_pins memory_clock_converter/s_axi_aclk]
-  connect_bd_net [get_bd_pins clocks/clk_out2] [get_bd_pins ps/saxihp0_fpd_aclk] \
-    [get_bd_pins memory_clock_converter/m_axi_aclk] [get_bd_pins memory_resets/slowest_sync_clk]
+  set hp_clock [get_bd_pins clocks/clk_out2]
+  set hp_reset [get_bd_pins memory_resets/peripheral_aresetn]
+  connect_bd_net $hp_clock [get_bd_pins memory_clock_converter/m_axi_aclk] \
+    [get_bd_pins memory_resets/slowest_sync_clk]
   connect_bd_net [get_bd_pins invert_reset/Res] [get_bd_pins memory_resets/ext_reset_in]
   connect_bd_net [get_bd_pins clocks/locked] [get_bd_pins memory_resets/dcm_locked]
   connect_bd_net [get_bd_pins resets/peripheral_aresetn] [get_bd_pins memory_clock_converter/s_axi_aresetn]
-  connect_bd_net [get_bd_pins memory_resets/peripheral_aresetn] [get_bd_pins memory_clock_converter/m_axi_aresetn]
-  connect_bd_intf_net [get_bd_intf_pins accelerator/M_AXI] [get_bd_intf_pins memory_clock_converter/S_AXI]
-  connect_bd_intf_net [get_bd_intf_pins memory_clock_converter/M_AXI] [get_bd_intf_pins ps/S_AXI_HP0_FPD]
+  connect_bd_net $hp_reset [get_bd_pins memory_clock_converter/m_axi_aresetn]
+  connect_bd_intf_net $memory_axi [get_bd_intf_pins memory_clock_converter/S_AXI]
+  set memory_axi [get_bd_intf_pins memory_clock_converter/M_AXI]
 }
+connect_bd_net $hp_clock [get_bd_pins ps/saxihp0_fpd_aclk]
+if {$axi_data_width != 128} {
+  set downsize [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dwidth_converter:2.1 memory_width_converter]
+  set_property -dict [list CONFIG.SI_DATA_WIDTH $axi_data_width CONFIG.MI_DATA_WIDTH {128} \
+    CONFIG.ADDR_WIDTH {40} CONFIG.SI_ID_WIDTH {6} CONFIG.FIFO_MODE {0}] $downsize
+  connect_bd_net $hp_clock [get_bd_pins memory_width_converter/s_axi_aclk]
+  connect_bd_net $hp_reset [get_bd_pins memory_width_converter/s_axi_aresetn]
+  connect_bd_intf_net $memory_axi [get_bd_intf_pins memory_width_converter/S_AXI]
+  set memory_axi [get_bd_intf_pins memory_width_converter/M_AXI]
+}
+connect_bd_intf_net $memory_axi [get_bd_intf_pins ps/S_AXI_HP0_FPD]
+puts "MEMORY_PATH bridge_bits=$axi_data_width crossing_bits=$axi_data_width hp_bits=128 downsizer_mhz=$mem_mhz"
 assign_bd_address
 set ctlseg [get_bd_addr_segs -of_objects [get_bd_addr_spaces ps/Data] -filter {NAME =~ *accelerator*}]
 if {[llength $ctlseg] != 1} {error "Cannot identify accelerator control segment: $ctlseg"}

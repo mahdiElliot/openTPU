@@ -2,6 +2,7 @@
 // All ports here use core_clk; IP Integrator converts M_AXI into the HP clock domain.
 module otpu_zu3eg_accel #(
   parameter int D = 128,
+  parameter int AXI_DATA_WIDTH = 256,
   parameter int MCOLS = 1,
   parameter int ACT_BLOCKS = 48,
   parameter int ACT_ROWS = 1,
@@ -57,9 +58,9 @@ module otpu_zu3eg_accel #(
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI AWREADY" *)
   input logic m_axi_awready,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI WDATA" *)
-  output logic [127:0] m_axi_wdata,
+  output logic [AXI_DATA_WIDTH-1:0] m_axi_wdata,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI WSTRB" *)
-  output logic [15:0] m_axi_wstrb,
+  output logic [AXI_DATA_WIDTH/8-1:0] m_axi_wstrb,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI WLAST" *)
   output logic m_axi_wlast,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI WVALID" *)
@@ -97,7 +98,7 @@ module otpu_zu3eg_accel #(
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARREADY" *)
   input logic m_axi_arready,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RDATA" *)
-  input logic [127:0] m_axi_rdata,
+  input logic [AXI_DATA_WIDTH-1:0] m_axi_rdata,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RID" *)
   input logic [5:0] m_axi_rid,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RRESP" *)
@@ -174,7 +175,7 @@ module otpu_zu3eg_accel #(
     .b_rdy, .b_rvalid, .b_rtag, .b_rdata, .wr_idle, .rd_idle,
     .halted, .error(core_error), .wait_to, .a_inval, .icount
   );
-  otpu_ps_dram #(.D(D)) u_ddr (
+  otpu_ps_dram #(.D(D), .AXI_DATA_WIDTH(AXI_DATA_WIDTH)) u_ddr (
     .clk, .rst(!aresetn), .a_flush(a_inval || !run),
     .a_req, .a_we, .a_addr, .a_wdata, .a_be, .a_rdy, .a_rvalid, .a_rdata,
     .sw_req, .sw_addr, .sw_wdata, .sw_be, .sw_rdy,

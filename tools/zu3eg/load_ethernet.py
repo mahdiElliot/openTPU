@@ -20,6 +20,10 @@ def main():
     parser.add_argument('--image', type=Path, required=True)
     parser.add_argument('--hardware', type=Path, required=True)
     parser.add_argument('--address', default='192.168.200.2')
+    parser.add_argument('--keep-running', action='store_true',
+                        help='leave the Arm monitor running for Ethernet inference data transfers')
+    parser.add_argument('--verify-only', action='store_true',
+                        help='verify the entire existing DDR image without rewriting it; useful after a readback timeout')
     options = parser.parse_args()
     image, hardware = options.image.resolve(), options.hardware.resolve()
     manifest = json.loads(image.with_suffix('.json').read_text())
@@ -47,16 +51,20 @@ def main():
         status = int(link.read(CONTROL_BASE + 0xc, 4).view('<u4')[0])
         if status & 0x80 or not status & 8:
             raise RuntimeError('Stop the accelerator and wait for DDR writes to drain before loading a model')
-        for at in range(0, total, chunk):
-            size = min(chunk, total - at)
-            with image.open('rb') as stream:
-                stream.seek(at)
-                data = stream.read(size)
-            link.write(base + at, np.frombuffer(data, dtype=np.uint8))
-            if link.crc32(base + at, size) != zlib.crc32(data):
-                raise RuntimeError(f'Ethernet DDR CRC mismatch at {at}')
-            print(f'ETHERNET_LOADED {at+size}/{total} bytes, CRC verified, {time.monotonic()-begin:.2f} s', flush=True)
-        upload_seconds = time.monotonic() - begin
+        if options.verify_only:
+            print('ETHERNET_VERIFY_ONLY checking existing DDR; no model writes', flush=True)
+            upload_seconds = 0.0
+        else:
+            for at in range(0, total, chunk):
+                size = min(chunk, total - at)
+                with image.open('rb') as stream:
+                    stream.seek(at)
+                    data = stream.read(size)
+                link.write(base + at, np.frombuffer(data, dtype=np.uint8))
+                if link.crc32(base + at, size) != zlib.crc32(data):
+                    raise RuntimeError(f'Ethernet DDR CRC mismatch at {at}')
+                print(f'ETHERNET_LOADED {at+size}/{total} bytes, CRC verified, {time.monotonic()-begin:.2f} s', flush=True)
+            upload_seconds = time.monotonic() - begin
         digest = hashlib.sha256()
         read_begin = time.monotonic()
         for at in range(0, total, chunk):
@@ -69,24 +77,26 @@ def main():
             raise RuntimeError('Full physical-DDR readback SHA-256 mismatch')
         verification_seconds = time.monotonic() - read_begin
         print('ETHERNET_FULL_DDR_SHA256_PASS', remote_sha, flush=True)
-    finally:
-        link.close()
-    # All uploaded cache lines were flushed before acknowledgement. Stop the
-    # monitor so the existing JTAG inference runner owns memory exclusively.
-    debug = Jtag(image.parent / 'ethernet_handoff')
-    try:
-        debug.command('targets -set -filter {name == "Cortex-A53 #0"}; stop; '
-                      'targets -set -filter {name == "PSU"}')
-        khz = debug.words(CONTROL_BASE + 0x44)[0]
+        khz = int(link.read(CONTROL_BASE + 0x44, 4).view('<u4')[0])
         if khz != round(configuration['core_mhz'] * 1000):
             raise RuntimeError('The programmed core clock differs from the hardware build')
     finally:
-        debug.close()
+        link.close()
+    # Pure JTAG inference halts the monitor; Ethernet DDR transfers need it alive.
+    if not options.keep_running:
+        debug = Jtag(image.parent / 'ethernet_handoff')
+        try:
+            debug.command('targets -set -filter {name == "Cortex-A53 #0"}; stop; '
+                          'targets -set -filter {name == "PSU"}')
+        finally:
+            debug.close()
     result = {'image_bytes': total, 'ddr_base': hex(base), 'method': 'bare-metal A53 Ethernet monitor',
               'sha256': manifest['sha256'], 'full_ddr_readback_sha256': remote_sha,
               'full_readback_passed': True, 'sample_readbacks_passed': True,
               'target': manifest['target'], 'hardware_id': file_digest(hardware / 'opentpu_zu3eg.bit'),
-              'accelerator_restored': True, 'pristine': True, 'cpu0_halted': True,
+              'accelerator_restored': True, 'pristine': True,
+              'cpu0_halted': not options.keep_running,
+              'verification_only': options.verify_only,
               'upload_and_crc_seconds': upload_seconds,
               'full_readback_seconds': verification_seconds}
     save(loaded_path, result)

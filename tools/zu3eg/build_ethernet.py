@@ -7,8 +7,9 @@ import shutil
 import subprocess
 
 from .evaluate import ROOT
+from .settings import DEPLOY
 
-DEFAULT_WORKSPACE = ROOT / 'build/zu3eg/deployment512_16/ethernet/workspace_v2'
+DEFAULT_WORKSPACE = DEPLOY / 'ethernet/workspace'
 TOOLS = Path('/home/mahdi/vivado/Vitis/2022.2/gnu/aarch64/lin/aarch64-none/bin')
 
 

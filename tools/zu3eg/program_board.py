@@ -11,6 +11,7 @@ from opentpu import isa as I
 from opentpu import target as T
 
 from .jtag import CONTROL_BASE, Jtag, quote
+from .settings import CORE_MHZ, DEPLOY
 
 
 def program(link, hardware):
@@ -63,7 +64,7 @@ def program(link, hardware):
             'volatile_programming': True, 'cpu0_halted': True, 'register_test_passed': True}
 
 
-def measure_clock(link, expected_mhz=112.5):
+def measure_clock(link, expected_mhz=CORE_MHZ):
     words = np.asarray(I.assemble([I.loop(1, 0xffffffff), I.nop(), I.halt()]), dtype='<u4')
     logical_address = 0x3f000000
     link.write(0x10000000 + logical_address, words)
@@ -94,8 +95,8 @@ list $first $last $elapsed
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--hardware', type=Path, default=Path('build/zu3eg/deployment512_16/hardware'))
-    parser.add_argument('--out', type=Path, default=Path('build/zu3eg/deployment512_16/bringup'))
+    parser.add_argument('--hardware', type=Path, default=DEPLOY / 'hardware')
+    parser.add_argument('--out', type=Path, default=DEPLOY / 'bringup')
     options = parser.parse_args()
     link = Jtag(options.out)
     try:

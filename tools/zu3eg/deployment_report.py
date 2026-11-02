@@ -4,13 +4,13 @@ import json
 import re
 from pathlib import Path
 
-from .evaluate import ROOT
+from .settings import DEPLOY
 from .sequence import save
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--directory', type=Path, default=ROOT / 'build/zu3eg/deployment512_16')
+    parser.add_argument('--directory', type=Path, default=DEPLOY)
     parser.add_argument('--hardware', type=Path, help='override DIRECTORY/hardware')
     options = parser.parse_args()
     directory = options.directory.resolve()
@@ -57,8 +57,8 @@ def main():
               'seed_token': result['seed_token'], 'generated_tokens': result['generated_tokens'],
               'generated_text': result['generated_text'],
               'limitations': ['PS DDR initialization preserved from the existing board bootloader',
-                              'one AXI burst outstanding in the current DDR bridge',
-                              'wall rates include PC compilation and JTAG transfers',
+                              'DDR throughput depends on burst scheduling and memory latency',
+                              'wall rates include PC compilation, control and selected data transfers',
                               'device rates count accelerator RUN cycles only',
                               'model build and upload excluded from request timing']}
     save(directory / 'report.json', report)

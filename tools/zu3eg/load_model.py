@@ -9,13 +9,14 @@ from .jtag import Jtag, quote
 from .program_board import program
 from .sequence import save
 from .run_board import file_digest
+from .settings import DEPLOY
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--loader', type=Path, default=ROOT / 'build/zu3eg/deployment512_16/loader')
-    parser.add_argument('--hardware', type=Path, default=ROOT / 'build/zu3eg/deployment512_16/hardware')
-    parser.add_argument('--image', type=Path, default=ROOT / 'build/zu3eg/deployment512_16/run/model_image.bin')
+    parser.add_argument('--loader', type=Path, default=DEPLOY / 'loader')
+    parser.add_argument('--hardware', type=Path, default=DEPLOY / 'hardware')
+    parser.add_argument('--image', type=Path, default=DEPLOY / 'run/model_image.bin')
     parser.add_argument('--limit', type=int, default=0, help='test only this many bytes at a scratch address')
     options = parser.parse_args()
     if not options.image.is_file() or options.image.stat().st_size % 8:
