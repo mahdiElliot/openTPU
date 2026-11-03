@@ -102,3 +102,30 @@ PAIR = false
 MXU_E = 1
 TMEM_NSB = 4
 TMEM_SBH = 1
+
+# Failed routing experiment retained for reproducibility; do not deploy.
+# The combined settings had excessive routing pressure; WIN=8 is tested below.
+[variants.d128-m1-r4-cl2-w16]
+D = 128
+MCOLS = 1
+ACT_BLOCKS = 48
+ACT_ROWS = 4
+PAIR = false
+MXU_E = 1
+TMEM_NSB = 4
+TMEM_SBH = 1
+VPU_CL = 2
+WIN = 16
+
+# Recovery candidate: retain the second composite lane and the qualified WIN=8.
+[variants.d128-m1-r4-cl2]
+D = 128
+MCOLS = 1
+ACT_BLOCKS = 48
+ACT_ROWS = 4
+PAIR = false
+MXU_E = 1
+TMEM_NSB = 4
+TMEM_SBH = 1
+VPU_CL = 2
+WIN = 8

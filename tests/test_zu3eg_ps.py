@@ -63,7 +63,11 @@ def test_ps_bridge_combines_reads_and_keeps_sixteen_bursts_pending(depth, width)
                                         ("mys-zu3eg:d128-m1-r4", "int8"),
                                         ("mys-zu3eg:d128-m1-r4", "int4"),
                                         ("mys-zu3eg:d128-m1-r4-tmem4", "int8"),
-                                        ("mys-zu3eg:d128-m1-r4-tmem4", "int4")])
+                                        ("mys-zu3eg:d128-m1-r4-tmem4", "int4"),
+                                        ("mys-zu3eg:d128-m1-r4-cl2-w16", "int8"),
+                                        ("mys-zu3eg:d128-m1-r4-cl2-w16", "int4"),
+                                        ("mys-zu3eg:d128-m1-r4-cl2", "int8"),
+                                        ("mys-zu3eg:d128-m1-r4-cl2", "int4")])
 @pytest.mark.parametrize('combined', [False, True])
 def test_ps_board_kernel_matches_isa(tmp_path, target, fmt, combined):
     import sys
@@ -103,6 +107,8 @@ def test_ps_board_kernel_matches_isa(tmp_path, target, fmt, combined):
         parameters['MXU_E'] = T.load(target).uarch['MXU_E']
         parameters['TMEM_NSB'] = T.load(target).uarch['TMEM_NSB']
         parameters['TMEM_SBH'] = T.load(target).uarch['TMEM_SBH']
+        parameters['VPU_CL'] = T.load(target).uarch['VPU_CL']
+        parameters['WIN'] = T.load(target).uarch['WIN']
         if combined:
             parameters.update(READ_DEPTH=16, READ_CHUNKS=4)
         executable = rtlsim.build('tb_ps_core', sources + [

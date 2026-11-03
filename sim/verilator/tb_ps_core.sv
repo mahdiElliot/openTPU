@@ -2,7 +2,7 @@
 module tb_ps_core #(
   parameter int D = 128, MCOLS = 1, ACT_BLOCKS = 48, ACT_ROWS = 1, MXU_E = 1,
                 AXI_DATA_WIDTH = 256, READ_DEPTH = 8, READ_CHUNKS = 1, WORDS = 1 << 18,
-                TMEM_NSB = 2, TMEM_SBH = 0
+                TMEM_NSB = 2, TMEM_SBH = 0, VPU_CL = 1, WIN = 8
 );
   logic clk = 0, aresetn = 0, dump = 0;
   always #5 clk = !clk;
@@ -64,6 +64,7 @@ module tb_ps_core #(
                       .ACT_ROWS(ACT_ROWS), .MXU_E(MXU_E), .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
                       .MEMORY_STATS(1), .BRIDGE_READ_DEPTH(READ_DEPTH),
                       .TMEM_NSB(TMEM_NSB), .TMEM_SBH(TMEM_SBH),
+                      .VPU_CL(VPU_CL), .WIN(WIN),
                       .BRIDGE_B_DEPTH(READ_DEPTH > 8 ? READ_DEPTH : 8),
                       .BRIDGE_READ_CHUNKS(READ_CHUNKS)) dut (.*);
   int expected_pressure = 0, expected_starve = 0, expected_either = 0;
