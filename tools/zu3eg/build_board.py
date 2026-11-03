@@ -23,6 +23,13 @@ def main():
                         help='bridge AXI width; downsizing to the 128-bit HP port runs at the HP clock')
     parser.add_argument('--prepare-only', action='store_true', help='write build parameters without starting Vivado')
     parser.add_argument('--memory-stats', action='store_true', help='add per-run memory demand-stall counters')
+    parser.add_argument('--scheduler-pipeline', action='store_true',
+                        help='register scheduler ranges before footprint compaction')
+    parser.add_argument('--separate-mmcm', action='store_true',
+                        help='generate core and HP clocks with independent MMCMs')
+    parser.add_argument('--strategy', default='default', choices=(
+        'default', 'Performance_Explore', 'Congestion_SpreadLogic_high',
+        'Performance_ExplorePostRoutePhysOpt'), help='Vivado implementation strategy')
     parser.add_argument('--read-depth', type=int, choices=(8, 16), default=8)
     parser.add_argument('--read-chunks', type=int, choices=(1, 2, 4, 8), default=1,
                         help='maximum contiguous D-byte reads combined into one burst')
@@ -53,16 +60,21 @@ def main():
         'TMEM_GST', 'TMEM_PMP', 'TMEM_PRK', 'TMEM_SDM') if k in T.rtl_params(target)}
     parameters.update(AXI_DATA_WIDTH=options.axi_data_width, CORE_KHZ=round(options.core_mhz * 1000), ARCH_HASH=T.arch_hash(cfg))
     parameters['MEMORY_STATS'] = int(options.memory_stats)
+    parameters['SEQ_FP_PIPE'] = int(options.scheduler_pipeline)
     parameters.update(BRIDGE_READ_DEPTH=options.read_depth, BRIDGE_B_DEPTH=options.read_depth,
                       BRIDGE_READ_CHUNKS=options.read_chunks)
     (out / 'build_params.tcl').write_text(
         f'set core_mhz {options.core_mhz}\nset mem_mhz {mem_mhz}\nset axi_data_width {options.axi_data_width}\n' +
+        f'set separate_mmcm {int(options.separate_mmcm)}\nset implementation_strategy {{{options.strategy}}}\n' +
         'set accelerator_parameters {' + ' '.join(
             f'CONFIG.{k} {int(v)}' for k, v in parameters.items()) + '}\n')
     metadata = target.to_dict() | {
         'target': options.target, 'core_mhz': options.core_mhz, 'mem_mhz': mem_mhz,
         'dual_clock': mem_mhz != options.core_mhz, 'rtl_parameters': parameters,
         'memory_stats': options.memory_stats,
+        'scheduler_footprint_pipeline': options.scheduler_pipeline,
+        'separate_mmcm': options.separate_mmcm,
+        'implementation_strategy': options.strategy,
         'ps_pl0_input_mhz': 100, 'control_base': '0x80000000',
         'ddr_base': '0x10000000', 'ps_boot': 'preserve existing initialized PS DDR; PL-only programming',
         'memory_bridge': f'queued {options.axi_data_width}-bit bridge, 128-bit HP0, up to {options.read_depth} reads outstanding, up to {options.read_chunks} chunks per read burst, independent writes, 32-byte scale-line cache',

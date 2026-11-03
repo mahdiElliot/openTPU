@@ -69,7 +69,8 @@ def test_ps_bridge_combines_reads_and_keeps_sixteen_bursts_pending(depth, width)
                                         ("mys-zu3eg:d128-m1-r4-cl2", "int8"),
                                         ("mys-zu3eg:d128-m1-r4-cl2", "int4")])
 @pytest.mark.parametrize('combined', [False, True])
-def test_ps_board_kernel_matches_isa(tmp_path, target, fmt, combined):
+@pytest.mark.parametrize('fp_pipe', [False, True])
+def test_ps_board_kernel_matches_isa(tmp_path, target, fmt, combined, fp_pipe):
     import sys
     from dataclasses import replace
 
@@ -89,13 +90,20 @@ def test_ps_board_kernel_matches_isa(tmp_path, target, fmt, combined):
         if isinstance(value, Weight):
             value.fmt = fmt
     compiled, images = compile_kernel(mlp, cfg, **arguments)
-    program_at = cfg.DRAM_BYTES - 4 * cfg.IMEM_WORDS
+    _compare_ps_core(tmp_path, target, cfg, compiled.programs, images, combined, fp_pipe)
+
+
+def _compare_ps_core(tmp_path, target, cfg, programs, images, combined, fp_pipe, program_at=None):
+    import numpy as np
+    from opentpu import isa as I, target as T
+    from opentpu.isasim import Machine
+    program_at = cfg.DRAM_BYTES - 4 * cfg.IMEM_WORDS if program_at is None else program_at
     assert not np.any(images[0][program_at:])
-    words = np.asarray(I.assemble(compiled.programs[0]), dtype='<u4')
+    words = np.asarray(I.assemble(programs[0]), dtype='<u4')
     image = np.zeros(cfg.DRAM_BYTES, dtype=np.uint8)
     image[:len(images[0])] = images[0]
     image[program_at:program_at + words.nbytes] = words.view(np.uint8)
-    reference = Machine(cfg, compiled.programs, [image]).run(max_steps=1 << 30)
+    reference = Machine(cfg, programs, [image]).run(max_steps=1 << 30)
     image.view('<u4').astype('>u4').tofile(tmp_path / 'input.bin')
     sources = [rtlsim.RTL / f for f in T.CORE + T.TECH['generic'] + [
         'asic/otpu_asic_top.sv', 'shell/otpu_ctrl.sv',
@@ -109,21 +117,45 @@ def test_ps_board_kernel_matches_isa(tmp_path, target, fmt, combined):
         parameters['TMEM_SBH'] = T.load(target).uarch['TMEM_SBH']
         parameters['VPU_CL'] = T.load(target).uarch['VPU_CL']
         parameters['WIN'] = T.load(target).uarch['WIN']
+        parameters['SEQ_FP_PIPE'] = int(fp_pipe)
         if combined:
             parameters.update(READ_DEPTH=16, READ_CHUNKS=4)
         executable = rtlsim.build('tb_ps_core', sources + [
             rtlsim.TB / 'otpu_ps_axi_mem.sv', rtlsim.TB / 'tb_ps_core.sv'], parameters)
         result = rtlsim.run_sim([str(executable), f'+dir={tmp_path}',
                                 f'+program_addr={program_at}',
-                                f'+program_n={len(compiled.programs[0])}'], timeout=60)
+                                f'+program_n={len(programs[0])}'], timeout=60)
         assert result.returncode == 0, result.stdout + result.stderr
         assert 'PS_CORE_PASS' in result.stdout
         stats = re.search(r'PS_CORE_PASS cycles=(\d+) max_reads=(\d+)', result.stdout)
         assert stats and int(stats[2]) > 1, result.stdout
-        print(f'PS kernel {target} {fmt}: {stats[1]} cycles, {stats[2]} reads outstanding')
+        print(f'PS core {target} FP_PIPE={fp_pipe}: {stats[1]} cycles, {stats[2]} reads outstanding')
         actual = np.fromfile(tmp_path / 'dram_out.bin', dtype=np.uint8)
         assert np.array_equal(actual, reference.slices[0].dram)
         scratchpad = rtlsim._read_hex(tmp_path / 'tmem_0.hex', cfg.TMEM_WORDS)
         assert np.array_equal(scratchpad, reference.slices[0].tmem)
     finally:
         rtlsim.VFLAGS[:] = flags
+
+
+@pytest.mark.parametrize('seed', range(4))
+@pytest.mark.parametrize('fp_pipe', [False, True])
+def test_ps_scheduler_pipeline_hazards_and_control(tmp_path, seed, fp_pipe):
+    from dataclasses import replace
+    import numpy as np
+    from opentpu import isa as I, target as T
+    from test_rtl import _hazard_program, _images, DATA, SCRATCH
+
+    target = 'mys-zu3eg:d128-m1-r4-cl2'
+    cfg = replace(T.config(target), DRAM_BYTES=1 << 20)
+    rng = np.random.default_rng(8100 + seed)
+    images = _images(rng, 1)
+    images[0][0xf4000:0xf4004] = np.asarray([128], dtype='<u4').view(np.uint8)
+    prefix = [I.li(1, 3), I.li(2, 0), I.loop(3, 0, rcount=1),
+              I.ld(DATA, 8192, 8, ra=2), I.st(SCRATCH, 8192, 8, ra=2), I.addi(2, 2, 32),
+              I.loop(1, 0), I.st(SCRATCH + 2048, 8192, 8)]
+    body = _hazard_program(rng, cfg, n_ops=80, gather=False)[:-1]
+    suffix = [I.ld(0xf4000, 12000, 1), I.rld(7, 12000, raw=True),
+              I.st(SCRATCH + 4096, 8192, 8, ra=7), I.halt()]
+    _compare_ps_core(tmp_path, target, cfg, [prefix + body + suffix], images, True, fp_pipe,
+                     program_at=0xf8000)

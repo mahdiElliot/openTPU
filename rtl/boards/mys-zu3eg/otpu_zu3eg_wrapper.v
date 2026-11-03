@@ -3,6 +3,7 @@ module otpu_zu3eg_wrapper #(
   parameter integer D = 128,
   parameter integer AXI_DATA_WIDTH = 256,
   parameter integer MEMORY_STATS = 0,
+  parameter integer SEQ_FP_PIPE = 0,
   parameter integer BRIDGE_READ_DEPTH = 8,
   parameter integer BRIDGE_B_DEPTH = 8,
   parameter integer BRIDGE_READ_CHUNKS = 1,
@@ -149,6 +150,7 @@ module otpu_zu3eg_wrapper #(
 );
   otpu_zu3eg_accel #(
     .AXI_DATA_WIDTH(AXI_DATA_WIDTH), .MEMORY_STATS(MEMORY_STATS),
+    .SEQ_FP_PIPE(SEQ_FP_PIPE),
     .BRIDGE_READ_DEPTH(BRIDGE_READ_DEPTH), .BRIDGE_B_DEPTH(BRIDGE_B_DEPTH),
     .BRIDGE_READ_CHUNKS(BRIDGE_READ_CHUNKS),
     .D(D),

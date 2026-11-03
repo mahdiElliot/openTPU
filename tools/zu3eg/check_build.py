@@ -42,7 +42,8 @@ def memory_path(directory, configuration):
         errors.append('Downsizing must follow the wide crossing')
     if not connected('memory_width_converter/M_AXI', 'ps/S_AXI_HP0_FPD', True):
         errors.append('Downsizer output does not connect to HP0')
-    clock = 'clocks/clk_out2' if dual else 'clocks/clk_out1'
+    clock = ('memory_clocks/clk_out1' if configuration.get('separate_mmcm') else
+             'clocks/clk_out2') if dual else 'clocks/clk_out1'
     if not connected(clock, 'memory_width_converter/s_axi_aclk'):
         errors.append('Downsizer is not clocked in the HP domain')
     if not connected(clock, 'ps/saxihp0_fpd_aclk'):

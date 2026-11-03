@@ -4,6 +4,8 @@ set root [file normalize [lindex $argv 0]]
 set out [file normalize [lindex $argv 1]]
 source [file join $out sources.tcl]
 source [file join $out build_params.tcl]
+if {![info exists separate_mmcm]} {set separate_mmcm 0}
+if {![info exists implementation_strategy]} {set implementation_strategy default}
 set_param general.maxThreads 4
 create_project -force opentpu_zu3eg [file join $out project] -part xczu3eg-sfvc784-1-i
 set_property verilog_define {SYNTHESIS} [current_fileset]
@@ -22,8 +24,20 @@ set clk [create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz:6.0 clocks]
 set_property -dict [list CONFIG.PRIM_IN_FREQ {100.000} \
   CONFIG.CLKOUT1_REQUESTED_OUT_FREQ $core_mhz \
   CONFIG.USE_RESET {false}] $clk
-if {$mem_mhz != $core_mhz} {
+set all_locked [get_bd_pins clocks/locked]
+if {$mem_mhz != $core_mhz && !$separate_mmcm} {
   set_property -dict [list CONFIG.CLKOUT2_USED {true} CONFIG.CLKOUT2_REQUESTED_OUT_FREQ $mem_mhz] $clk
+}
+if {$mem_mhz != $core_mhz && $separate_mmcm} {
+  set mem_clk [create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz:6.0 memory_clocks]
+  set_property -dict [list CONFIG.PRIM_IN_FREQ {100.000} \
+    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ $mem_mhz CONFIG.USE_RESET {false}] $mem_clk
+  connect_bd_net [get_bd_pins ps/pl_clk0] [get_bd_pins memory_clocks/clk_in1]
+  set locks [create_bd_cell -type ip -vlnv xilinx.com:ip:util_vector_logic:2.0 clock_locks]
+  set_property -dict [list CONFIG.C_OPERATION {and} CONFIG.C_SIZE {1}] $locks
+  connect_bd_net [get_bd_pins clocks/locked] [get_bd_pins clock_locks/Op1]
+  connect_bd_net [get_bd_pins memory_clocks/locked] [get_bd_pins clock_locks/Op2]
+  set all_locked [get_bd_pins clock_locks/Res]
 }
 set reset [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 resets]
 set invert [create_bd_cell -type ip -vlnv xilinx.com:ip:util_vector_logic:2.0 invert_reset]
@@ -39,7 +53,7 @@ connect_bd_net [get_bd_pins clocks/clk_out1] \
   [get_bd_pins control/ACLK] [get_bd_pins control/S00_ACLK] [get_bd_pins control/M00_ACLK]
 connect_bd_net [get_bd_pins ps/pl_resetn0] [get_bd_pins invert_reset/Op1]
 connect_bd_net [get_bd_pins invert_reset/Res] [get_bd_pins resets/ext_reset_in]
-connect_bd_net [get_bd_pins clocks/locked] [get_bd_pins resets/dcm_locked]
+connect_bd_net $all_locked [get_bd_pins resets/dcm_locked]
 connect_bd_net [get_bd_pins resets/peripheral_aresetn] [get_bd_pins accelerator/aresetn] \
   [get_bd_pins control/ARESETN] [get_bd_pins control/S00_ARESETN] [get_bd_pins control/M00_ARESETN]
 connect_bd_intf_net [get_bd_intf_pins ps/M_AXI_HPM0_LPD] [get_bd_intf_pins control/S00_AXI]
@@ -55,12 +69,12 @@ if {$mem_mhz != $core_mhz} {
   set_property -dict [list CONFIG.ACLK_ASYNC {1} CONFIG.SYNCHRONIZATION_STAGES {3} \
     CONFIG.DATA_WIDTH $axi_data_width] $crossing
   connect_bd_net [get_bd_pins clocks/clk_out1] [get_bd_pins memory_clock_converter/s_axi_aclk]
-  set hp_clock [get_bd_pins clocks/clk_out2]
+  set hp_clock [get_bd_pins [expr {$separate_mmcm ? "memory_clocks/clk_out1" : "clocks/clk_out2"}]]
   set hp_reset [get_bd_pins memory_resets/peripheral_aresetn]
   connect_bd_net $hp_clock [get_bd_pins memory_clock_converter/m_axi_aclk] \
     [get_bd_pins memory_resets/slowest_sync_clk]
   connect_bd_net [get_bd_pins invert_reset/Res] [get_bd_pins memory_resets/ext_reset_in]
-  connect_bd_net [get_bd_pins clocks/locked] [get_bd_pins memory_resets/dcm_locked]
+  connect_bd_net $all_locked [get_bd_pins memory_resets/dcm_locked]
   connect_bd_net [get_bd_pins resets/peripheral_aresetn] [get_bd_pins memory_clock_converter/s_axi_aresetn]
   connect_bd_net $hp_reset [get_bd_pins memory_clock_converter/m_axi_aresetn]
   connect_bd_intf_net $memory_axi [get_bd_intf_pins memory_clock_converter/S_AXI]
@@ -94,6 +108,7 @@ write_bd_tcl -force [file join $out system_bd.tcl]
 launch_runs synth_1 -jobs 2
 wait_on_run synth_1
 if {[get_property PROGRESS [get_runs synth_1]] != "100%"} {error "Synthesis failed"}
+if {$implementation_strategy ne "default"} {set_property strategy $implementation_strategy [get_runs impl_1]}
 launch_runs impl_1 -to_step write_bitstream -jobs 2
 wait_on_run impl_1
 if {[get_property PROGRESS [get_runs impl_1]] != "100%"} {error "Implementation failed"}

@@ -48,7 +48,8 @@ module otpu_asic_top
   parameter int TMEM_SDM   = -1,
   parameter bit SEQ_WC     = 1'b0,      // the sequencer's wait entries (otpu_slice)
   parameter bit COLL_GATHER = 1'b1,     // 0: the collective unit runs BAR alone (otpu_coll_bar)
-  parameter bit MEMORY_STATS = 1'b0
+  parameter bit MEMORY_STATS = 1'b0,
+  parameter bit SEQ_FP_PIPE = 1'b0
 ) (
   input  logic                clk,
   input  logic                sys_rst,      // the loader's reset
@@ -125,7 +126,7 @@ module otpu_asic_top
                .TMEM_NSB(TMEM_NSB), .TMEM_SBP(TMEM_SBP), .TMEM_SBH(TMEM_SBH),
                .TMEM_RPL(TMEM_RPL), .TMEM_TDP(TMEM_TDP), .TMEM_GST(TMEM_GST),
                .TMEM_PMP(TMEM_PMP), .TMEM_PRK(TMEM_PRK), .TMEM_SDM(TMEM_SDM),
-               .SEQ_WC(SEQ_WC)) u_slice (
+               .SEQ_WC(SEQ_WC), .SEQ_FP_PIPE(SEQ_FP_PIPE)) u_slice (
     // clk_f: TMEM_PMP 0 (above), so no 2x clock
     .clk, .clk_f(1'b0), .sys_rst, .rst, .rinit(rinit_a), .ld_start, .ld_addr, .ld_n, .ld_busy,
     .a_rdy, .b_rdy, .sw_rdy, .wr_idle, .rd_idle,

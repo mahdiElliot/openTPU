@@ -46,7 +46,8 @@ module otpu_seq
   // start's k for the DMA and the quantizer), and for the VPU, which starts its oldest ready
   // instruction, a mask of the VPU instructions 1..31 back it waits for. No footprints, no range
   // compares. 0: today's scoreboard.
-  parameter bit WAITC      = 1'b0
+  parameter bit WAITC      = 1'b0,
+  parameter bit FP_PIPE    = 1'b0     // register raw ranges before footprint compaction
 ) (
   input  logic                clk,
   input  logic                rst,
@@ -499,24 +500,37 @@ module otpu_seq
   // partial products) -> S (products) -> Q (footprint ranges) -> C (dependencies on the window,
   // slot allocation). In order; a stage holds while the next cannot take its instruction (C:
   // the window is full). The stages stream, so they add latency only at the program start.
-  logic        p_v, s_v, q_v, c_v;
+  localparam bit RANGE_PIPE = FP_PIPE && !WAITC;
+  logic        p_v, s_v, q_v, f_v, c_v;
   cmd_t        p_cmd, s_cmd, q_cmd, c_cmd;
   logic [2:0]  p_unit, s_unit, q_unit, c_unit;
   logic [31:0] p_pc, s_pc, q_pc, c_pc;
   fpp_t        s_pp;
   fpm_t        q_pr;
   fp_t         q_fp;             // Q's footprint ranges (otpu_pkg form)
+  fp_t         f_fp;             // optional registered raw ranges
+  cmd_t        f_cmd;
+  logic [2:0]  f_unit;
+  logic [31:0] f_pc;
+  wire         seg_v = RANGE_PIPE ? f_v : q_v;
+  cmd_t        seg_cmd;
+  fp_t         seg_fp;
+  wire [2:0]   seg_unit = RANGE_PIPE ? f_unit : q_unit;
+  wire [31:0]  seg_pc = RANGE_PIPE ? f_pc : q_pc;
+  assign seg_cmd = RANGE_PIPE ? f_cmd : q_cmd;
+  assign seg_fp = RANGE_PIPE ? f_fp : q_fp;
   fps_t        c_fp;
   logic        have_free;
   logic        wc_hold;          // WAITC: a VPU instruction waits for the one VMW back
   wire         c_go = c_v && have_free && !wc_hold;
-  wire         q_adv = !c_v || c_go;            // Q hands its instruction to C
+  wire         c_adv = !c_v || c_go;
+  wire         q_adv = RANGE_PIPE ? (!f_v || c_adv) : c_adv;
   wire         s_adv = !q_v || q_adv;           // S hands its instruction to Q
   // P hands its instruction to S (WAITC: to C, no footprint stages)
   wire         p_adv = WAITC ? (!c_v || c_go) : (!s_v || s_adv);
   logic [SWW-1:0] p_sync, c_sync;               // WAITC: the instruction's wait entry
   wire         r_take = !p_v || p_adv;          // P can take the instruction at R
-  wire         pipe_empty = !p_v && !s_v && !q_v && !c_v;
+  wire         pipe_empty = !p_v && !s_v && !q_v && (!RANGE_PIPE || !f_v) && !c_v;
   // R retires a control instruction this cycle (NOP, HALT, LI, ADDI, a LOOP's second cycle)
   logic        r_ret;
 
@@ -904,7 +918,7 @@ module otpu_seq
       pc <= '0; sp <= '0; cyc <= '0;
       halted <= 1'b0; error <= 1'b0; stopping <= 1'b0;
       rl_wait <= 1'b0; ch_req <= 1'b0;
-      p_v <= 1'b0; s_v <= 1'b0; q_v <= 1'b0; c_v <= 1'b0; lp <= 1'b0;
+      p_v <= 1'b0; s_v <= 1'b0; q_v <= 1'b0; f_v <= 1'b0; c_v <= 1'b0; lp <= 1'b0;
       icount <= '0;
       sv <= '0; sstarted <= '0; sready <= '0;
       for (int i = 0; i < 8; i++) R[i] <= '0;
@@ -943,6 +957,8 @@ module otpu_seq
                    c_pc, i);
         end
       // fp_seg's assumptions: ACT ranges fit [alo, ahi), DRAM ranges share their write role
+      if (RANGE_PIPE && seg_v && c_adv && seg_fp !== footprint(seg_cmd, D, S))
+        $fatal(1, "otpu_seq: registered footprint differs from command at pc %0d", seg_pc);
       if (q_v && q_adv) begin
         logic dr, dwr;
         dr = 1'b0; dwr = 1'b0;
@@ -1103,18 +1119,27 @@ module otpu_seq
         sfp_raw[free_slot] <= c_raw;
 `endif
       end
-      // ---- Q: footprint ranges
-      if (!WAITC && q_adv) begin
-        c_v <= q_v;
+      // ---- optional F: register raw ranges. Command, PC, unit and valid move
+      // atomically with the footprint and hold whenever the next stage stalls.
+      if (RANGE_PIPE && q_adv) begin
+        f_v <= q_v;
         if (q_v) begin
-          c_cmd <= q_cmd; c_unit <= q_unit; c_pc <= q_pc;
-          c_fp <= hz_coarse(fp_seg(q_cmd.op, q_fp));
+          f_cmd <= q_cmd; f_unit <= q_unit; f_pc <= q_pc; f_fp <= q_fp;
+        end
+      end
+      // ---- C input: compact the ranges after their arithmetic, or retain the
+      // original Q -> C path when FP_PIPE=0. WAITC bypasses both range stages.
+      if (!WAITC && c_adv) begin
+        c_v <= seg_v;
+        if (seg_v) begin
+          c_cmd <= seg_cmd; c_unit <= seg_unit; c_pc <= seg_pc;
+          c_fp <= hz_coarse(fp_seg(seg_cmd.op, seg_fp));
 `ifndef SYNTHESIS
-          c_fpx <= fp_seg(q_cmd.op, q_fp);
+          c_fpx <= fp_seg(seg_cmd.op, seg_fp);
 `endif
 `ifndef SYNTHESIS
-          c_ref <= fp_hull(q_fp);
-          c_raw <= q_fp;
+          c_ref <= fp_hull(seg_fp);
+          c_raw <= seg_fp;
 `endif
         end
       end

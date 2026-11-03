@@ -4,6 +4,7 @@ module otpu_zu3eg_accel #(
   parameter int D = 128,
   parameter int AXI_DATA_WIDTH = 256,
   parameter bit MEMORY_STATS = 1'b0,
+  parameter bit SEQ_FP_PIPE = 1'b0,
   parameter int BRIDGE_READ_DEPTH = 8,
   parameter int BRIDGE_B_DEPTH = 8,
   parameter int BRIDGE_READ_CHUNKS = 1,
@@ -209,7 +210,7 @@ module otpu_zu3eg_accel #(
     .VPU_CL(VPU_CL), .ULANES(ULANES), .HAS_DSTEP(0), .TMEM_IMPL(3),
     .RPB(RPB), .WPB(WPB), .TMEM_NSB(TMEM_NSB), .TMEM_SBP(TMEM_SBP), .TMEM_SBH(TMEM_SBH),
     .TMEM_RPL(TMEM_RPL), .TMEM_TDP(TMEM_TDP), .TMEM_GST(TMEM_GST), .TMEM_PMP(TMEM_PMP), .TMEM_PRK(TMEM_PRK), .TMEM_SDM(TMEM_SDM),
-    .SEQ_WC(0), .COLL_GATHER(0), .MEMORY_STATS(MEMORY_STATS)
+    .SEQ_WC(0), .COLL_GATHER(0), .MEMORY_STATS(MEMORY_STATS), .SEQ_FP_PIPE(SEQ_FP_PIPE)
   ) u_core (
     .clk, .sys_rst(!aresetn), .rst(!aresetn || !run), .rinit,
     .ld_start, .ld_addr, .ld_n, .ld_busy,

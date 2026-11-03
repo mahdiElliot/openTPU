@@ -7,8 +7,11 @@ from tools.zu3eg.check_build import memory_path
 
 
 @pytest.mark.parametrize('fault', [None, 'slow_downsizer', 'narrow_crossing', 'reversed_path'])
-def test_wide_memory_path_rejects_bandwidth_bottlenecks(tmp_path, fault):
-    configuration = {'bridge_axi_bits': 256, 'core_mhz': 177.5, 'mem_mhz': 332.8125}
+@pytest.mark.parametrize('separate', [False, True])
+def test_wide_memory_path_rejects_bandwidth_bottlenecks(tmp_path, fault, separate):
+    configuration = {'bridge_axi_bits': 256, 'core_mhz': 200, 'mem_mhz': 332.8125,
+                     'separate_mmcm': separate}
+    hp_clock = 'memory_clocks/clk_out1' if separate else 'clocks/clk_out2'
     design = {
         'components': {
             'memory_clock_converter': {'parameters': {'DATA_WIDTH': {'value': '256'}}},
@@ -18,7 +21,7 @@ def test_wide_memory_path_rejects_bandwidth_bottlenecks(tmp_path, fault):
             'core': {'interface_ports': ['accelerator/M_AXI', 'memory_clock_converter/S_AXI']},
             'wide': {'interface_ports': ['memory_clock_converter/M_AXI', 'memory_width_converter/S_AXI']},
             'hp': {'interface_ports': ['memory_width_converter/M_AXI', 'ps/S_AXI_HP0_FPD']}},
-        'nets': {'hp_clock': {'ports': ['clocks/clk_out2', 'ps/saxihp0_fpd_aclk',
+        'nets': {'hp_clock': {'ports': [hp_clock, 'ps/saxihp0_fpd_aclk',
                                         'memory_width_converter/s_axi_aclk']}}}
     if fault == 'slow_downsizer':
         design['nets']['hp_clock']['ports'].remove('memory_width_converter/s_axi_aclk')

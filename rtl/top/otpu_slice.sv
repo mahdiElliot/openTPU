@@ -80,7 +80,8 @@ module otpu_slice
                                       //   at bit 3p; 0: PRANK3, below)
   parameter int TMEM_SDM   = -1,      // TMEM_TDP: the read ports' RAM sides (bit p: port p on
                                       //   port A; -1: TM_SIDED, below)
-  parameter bit SEQ_WC     = 1'b0     // EXPERIMENTAL: otpu_seq's wait counts (WAITC, docs/seq_vpu.md)
+  parameter bit SEQ_WC     = 1'b0,    // EXPERIMENTAL: otpu_seq's wait counts (WAITC, docs/seq_vpu.md)
+  parameter bit SEQ_FP_PIPE = 1'b0
 ) (
   input  logic          clk,
   input  logic          clk_f,      // TMEM_PMP 1: 2 x clk, rising with it (the MMCM's); else unused
@@ -245,7 +246,7 @@ module otpu_slice
   logic        dma_err;           // a WAITW timed out: the slice stops with an error (to_err)
   logic [31:0] sq_icount, sq_cha, sq_chn, rl_val;
   otpu_seq #(.IMEM_WORDS(IMEM_WORDS), .TMEM_WORDS(TMEM_WORDS), .SID(SID), .S(S), .D(D),
-             .WIN(WIN), .STREAMS(HAS_SS), .WAITC(SEQ_WC)) u_seq (
+             .WIN(WIN), .STREAMS(HAS_SS), .WAITC(SEQ_WC), .FP_PIPE(SEQ_FP_PIPE)) u_seq (
     .clk, .rst(srst), .ucmd(ucmd_s), .ustart(ustart_s), .urel, .urdy(urdy_s), .udone(udone_s),
     .halted(sq_halted), .error(sq_err),
     .icount(sq_icount), .ev(sq_ev), .rinit, .rl_v, .rl_val, .ch_req(sq_ch), .ch_addr(sq_cha),
