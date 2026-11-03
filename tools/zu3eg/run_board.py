@@ -253,6 +253,19 @@ def memory_statistics(link, cycles):
             'either_condition_cycles': union, 'overlap_cycles': pressure + starve - union}
 
 
+def port_statistics(link, hardware):
+    """Count AXI wire traffic per active HP path, without loader traffic."""
+    ports = hardware['hp_ports']
+    identity = link.read(CONTROL_BASE + 0x310, 8).view('<u4').tolist()
+    if identity != [0x4d485031, len(ports)]:
+        raise RuntimeError(f'Independent HP traffic counters differ from hardware: {identity}')
+    counts = link.read(CONTROL_BASE + 0x320, 8*len(ports)).view('<u4').tolist()
+    beat_bytes = hardware['bridge_axi_bits']//8
+    return {f'hp{hp}': {'read_bytes': counts[2*p]*beat_bytes,
+                         'write_wire_bytes': counts[2*p+1]*beat_bytes}
+            for p, hp in enumerate(ports)}
+
+
 def device_decode(eng, seed, count):
     """Run greedy decoding in one hardware loop, preserving final-logit validation.
 
@@ -391,6 +404,9 @@ def main():
             raise RuntimeError('Hardware/software core clock metadata differ')
         if 'rtl_parameters' in hardware and link.words(CONTROL_BASE + 0x9c)[0] != T.arch_hash(cfg):
             raise RuntimeError('Hardware configuration hash differs')
+        if options.memory_stats and len(hardware.get('hp_ports', [0])) > 1:
+            if link.words(CONTROL_BASE+0x310, 2) != [0x4d485031, len(hardware['hp_ports'])]:
+                raise RuntimeError('Program the matching HP-port configuration before running')
         if options.kernel_only and (options.out / 'model_loaded.json').exists():
             loaded_before = json.loads((options.out / 'model_loaded.json').read_text())
             loaded_before['pristine'] = False
@@ -411,7 +427,11 @@ def main():
             kernel_check(link, options.out, options.target, hardware_id, 'int4')
         if options.kernel_only:
             return
+        from .configure_hp import inspect as inspect_hp
         request = {'target': options.target, 'config': asdict(cfg), 'hardware_id': hardware_id,
+                   'hp_ports': hardware.get('hp_ports', [0]),
+                   'bridge_axi_bits': hardware.get('bridge_axi_bits', 256),
+                   'hp_configuration': inspect_hp(link, hardware.get('hp_ports', [0])),
                    'core_khz': khz, 'mem_mhz': hardware.get('mem_mhz', hardware['core_mhz']),
                    'prefill_tokens': ids, 'decode_steps': options.decode, 'request_id': request_id,
                    'context_capacity': options.capacity, 'weight_format': 'int4', 'head_format': 'int8',
@@ -452,6 +472,8 @@ def main():
                 row['profile'] = link.take(elapsed, row['cycles'], khz * 1000)
             if options.memory_stats:
                 row['memory_stats'] = memory_statistics(link, row['cycles'])
+                if len(hardware.get('hp_ports', [0])) > 1:
+                    row['port_traffic'] = port_statistics(link, hardware)
             steps.append(row)
             save(options.out / 'progress.json', request | {'complete': False, 'steps': steps})
             print(f'BOARD prefill {position+1}/{len(ids)}: {row["cycles"]} cycles, {elapsed:.3f} wall s', flush=True)
@@ -468,6 +490,8 @@ def main():
                 row['profile'] = link.take(row['wall_seconds'], row['cycles'], khz * 1000)
             if options.memory_stats:
                 row['memory_stats'] = memory_statistics(link, row['cycles'])
+                if len(hardware.get('hp_ports', [0])) > 1:
+                    row['port_traffic'] = port_statistics(link, hardware)
             steps.append(row)
             print(f'BOARD device decode {options.decode}: {stats["cycles"]} cycles, '
                   f'{tokenizer.decode([seed]+generated)!r}', flush=True)
@@ -485,6 +509,8 @@ def main():
                     row['profile'] = link.take(row['wall_seconds'], row['cycles'], khz * 1000)
                 if options.memory_stats:
                     row['memory_stats'] = memory_statistics(link, row['cycles'])
+                    if len(hardware.get('hp_ports', [0])) > 1:
+                        row['port_traffic'] = port_statistics(link, hardware)
                 steps.append(row)
                 save(options.out / 'progress.json', request | {'complete': False, 'steps': steps, 'generated_tokens': generated})
                 print(f'BOARD decode {index+1}/{options.decode}: {eng.stats[-1]["cycles"]} cycles, {tokenizer.decode([seed]+generated)!r}', flush=True)

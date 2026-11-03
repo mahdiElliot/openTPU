@@ -59,13 +59,14 @@ def measure(out, cfg, parameters, spec, weights, rows, head, bridge_source=None)
     dram.view('<u4').astype('>u4').tofile(out/'input.bin')
     sources = [rtlsim.RTL/f for f in T.CORE + T.TECH['generic'] + [
         'asic/otpu_asic_top.sv', 'shell/otpu_ctrl.sv',
-        'boards/mys-zu3eg/otpu_ps_dram.sv', 'boards/mys-zu3eg/otpu_zu3eg_accel.sv']]
+        'boards/mys-zu3eg/otpu_ps_dram.sv', 'boards/mys-zu3eg/otpu_ps_dram_multi.sv',
+        'boards/mys-zu3eg/otpu_zu3eg_accel.sv']]
     if bridge_source is not None:
         sources = [bridge_source.resolve() if p.name == 'otpu_ps_dram.sv' else p for p in sources]
     params = {k: getattr(cfg, k) for k in ('D', 'MCOLS', 'ACT_BLOCKS', 'ACT_ROWS')}
     params.update(parameters, WORDS=cfg.DRAM_BYTES//4)
     exe = rtlsim.build('tb_ps_core', sources + [
-        rtlsim.TB/'otpu_ps_axi_mem.sv', rtlsim.TB/'tb_ps_core.sv'], params)
+        rtlsim.TB/'otpu_ps_multi_mem.sv', rtlsim.TB/'tb_ps_core.sv'], params)
     begin = time.monotonic()
     result = rtlsim.run_sim([str(exe), f'+dir={out.resolve()}',
                             f'+program_addr={at}', f'+program_n={len(programs[0])}'], timeout=300)
@@ -97,6 +98,7 @@ def main():
                         help='physical activation rows; defaults to the tested group size')
     parser.add_argument('--epilogue', type=int, choices=(1, 2), default=2)
     parser.add_argument('--chunks', type=int, choices=(2, 4, 8), default=8)
+    parser.add_argument('--hp-ports', type=int, choices=(1, 2), default=2)
     parser.add_argument('--reads', type=int, choices=(8, 16, 32), default=16)
     parser.add_argument('--latency', type=int, default=64)
     parser.add_argument('--cache-lines', type=int, choices=(1, 2, 4, 8), default=1)
@@ -112,7 +114,7 @@ def main():
     os.environ['OTPU_Q35_ROWS_OVERLAP'] = '1'
     rtlsim.VFLAGS[rtlsim.VFLAGS.index('-j')+1] = '2'
     cfg = replace(T.config('mys-zu3eg:d64-m2-r4-cl2'), ACT_ROWS=options.capacity_rows or options.rows)
-    parameters = dict(MXU_E=options.epilogue, FIFO_DEPTH=options.fifo,
+    parameters = dict(HP_PORTS=options.hp_ports, MXU_E=options.epilogue, FIFO_DEPTH=options.fifo,
                       TMEM_NSB=4, TMEM_SBH=1, VPU_CL=options.vpu_cl, WIN=options.window, SEQ_FP_PIPE=1,
                       READ_DEPTH=options.reads, READ_CHUNKS=options.chunks,
                       A_CACHE_LINES=options.cache_lines,

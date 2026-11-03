@@ -228,7 +228,7 @@ All these arguments are required to reproduce the selected profile:
 ```bash
 python -u -m tools.zu3eg.build_board \
   --target "$TARGET" --core-mhz "$CORE_MHZ" --mem-mhz "$MEM_MHZ" \
-  --axi-data-width "$AXI_DATA_WIDTH" --read-depth 16 --read-chunks 8 \
+  --axi-data-width "$AXI_DATA_WIDTH" --hp-ports 1 --read-depth 16 --read-chunks 8 \
   --scale-cache-lines 8 --write-depth 4 --memory-stats \
   --scheduler-pipeline --separate-mmcm \
   --strategy Performance_ExplorePostRoutePhysOpt \

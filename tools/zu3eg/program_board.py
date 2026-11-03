@@ -55,13 +55,18 @@ def program(link, hardware):
     link.write_word(CONTROL_BASE + 0x38, 0x1234ABCD)
     if link.words(CONTROL_BASE + 0x38) != [0x1234ABCD]:
         raise RuntimeError('AXI control-register readback failed')
+    hp_configuration = None
+    if len(configuration.get('hp_ports', [0])) > 1:
+        from .configure_hp import configure
+        hp_configuration = configure(link, configuration)
     return {'id': hex(identity[0]), 'version': hex(identity[1]), 'core_khz': khz,
             'target': configuration.get('target', 'mys-zu3eg:d128-m1'),
             'mem_mhz': configuration.get('mem_mhz', configuration['core_mhz']),
             'clock_registers': clocks, 'ddr_status': link.words(0xFD070004)[0],
             'setup_slack_ns': float(summary[1]), 'hold_slack_ns': float(summary[3]),
             'pulse_width_slack_ns': float(pulse[5]),
-            'volatile_programming': True, 'cpu0_halted': True, 'register_test_passed': True}
+            'volatile_programming': True, 'cpu0_halted': True, 'register_test_passed': True,
+            'hp_configuration': hp_configuration}
 
 
 def measure_clock(link, expected_mhz=CORE_MHZ):

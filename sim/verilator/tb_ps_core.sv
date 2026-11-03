@@ -1,49 +1,49 @@
 // Complete board-control, loader, core and PS-memory-path ISA comparison.
 module tb_ps_core #(
-  parameter int D = 128, MCOLS = 1, ACT_BLOCKS = 48, ACT_ROWS = 1, MXU_E = 1,
+  parameter int HP_PORTS = 1, D = 128, MCOLS = 1, ACT_BLOCKS = 48, ACT_ROWS = 1, MXU_E = 1,
                 AXI_DATA_WIDTH = 256, READ_DEPTH = 8, READ_CHUNKS = 1, WORDS = 1 << 18,
                 TMEM_NSB = 2, TMEM_SBH = 0, VPU_CL = 1, WIN = 8, SEQ_FP_PIPE = 0,
                 FIFO_DEPTH = 64, READ_LATENCY = 24, A_CACHE_LINES = 1, WRITE_DEPTH = 1
 );
   logic clk = 0, aresetn = 0, dump = 0;
   always #5 clk = !clk;
-  logic [39:0] m_axi_awaddr;
-  logic [7:0] m_axi_awlen;
-  logic [2:0] m_axi_awsize;
-  logic [1:0] m_axi_awburst;
-  logic [5:0] m_axi_awid;
-  logic m_axi_awlock;
-  logic [3:0] m_axi_awcache;
-  logic [2:0] m_axi_awprot;
-  logic [3:0] m_axi_awqos;
-  logic m_axi_awvalid;
-  logic m_axi_awready;
-  logic [AXI_DATA_WIDTH-1:0] m_axi_wdata;
-  logic [AXI_DATA_WIDTH/8-1:0] m_axi_wstrb;
-  logic m_axi_wlast;
-  logic m_axi_wvalid;
-  logic m_axi_wready;
-  logic [5:0] m_axi_bid;
-  logic [1:0] m_axi_bresp;
-  logic m_axi_bvalid;
-  logic m_axi_bready;
-  logic [39:0] m_axi_araddr;
-  logic [7:0] m_axi_arlen;
-  logic [2:0] m_axi_arsize;
-  logic [1:0] m_axi_arburst;
-  logic [5:0] m_axi_arid;
-  logic m_axi_arlock;
-  logic [3:0] m_axi_arcache;
-  logic [2:0] m_axi_arprot;
-  logic [3:0] m_axi_arqos;
-  logic m_axi_arvalid;
-  logic m_axi_arready;
-  logic [AXI_DATA_WIDTH-1:0] m_axi_rdata;
-  logic [5:0] m_axi_rid;
-  logic [1:0] m_axi_rresp;
-  logic m_axi_rlast;
-  logic m_axi_rvalid;
-  logic m_axi_rready;
+  logic [HP_PORTS-1:0][39:0] m_axi_awaddr;
+  logic [HP_PORTS-1:0][7:0] m_axi_awlen;
+  logic [HP_PORTS-1:0][2:0] m_axi_awsize;
+  logic [HP_PORTS-1:0][1:0] m_axi_awburst;
+  logic [HP_PORTS-1:0][5:0] m_axi_awid;
+  logic [HP_PORTS-1:0] m_axi_awlock;
+  logic [HP_PORTS-1:0][3:0] m_axi_awcache;
+  logic [HP_PORTS-1:0][2:0] m_axi_awprot;
+  logic [HP_PORTS-1:0][3:0] m_axi_awqos;
+  logic [HP_PORTS-1:0] m_axi_awvalid;
+  logic [HP_PORTS-1:0] m_axi_awready;
+  logic [HP_PORTS-1:0][AXI_DATA_WIDTH-1:0] m_axi_wdata;
+  logic [HP_PORTS-1:0][AXI_DATA_WIDTH/8-1:0] m_axi_wstrb;
+  logic [HP_PORTS-1:0] m_axi_wlast;
+  logic [HP_PORTS-1:0] m_axi_wvalid;
+  logic [HP_PORTS-1:0] m_axi_wready;
+  logic [HP_PORTS-1:0][5:0] m_axi_bid;
+  logic [HP_PORTS-1:0][1:0] m_axi_bresp;
+  logic [HP_PORTS-1:0] m_axi_bvalid;
+  logic [HP_PORTS-1:0] m_axi_bready;
+  logic [HP_PORTS-1:0][39:0] m_axi_araddr;
+  logic [HP_PORTS-1:0][7:0] m_axi_arlen;
+  logic [HP_PORTS-1:0][2:0] m_axi_arsize;
+  logic [HP_PORTS-1:0][1:0] m_axi_arburst;
+  logic [HP_PORTS-1:0][5:0] m_axi_arid;
+  logic [HP_PORTS-1:0] m_axi_arlock;
+  logic [HP_PORTS-1:0][3:0] m_axi_arcache;
+  logic [HP_PORTS-1:0][2:0] m_axi_arprot;
+  logic [HP_PORTS-1:0][3:0] m_axi_arqos;
+  logic [HP_PORTS-1:0] m_axi_arvalid;
+  logic [HP_PORTS-1:0] m_axi_arready;
+  logic [HP_PORTS-1:0][AXI_DATA_WIDTH-1:0] m_axi_rdata;
+  logic [HP_PORTS-1:0][5:0] m_axi_rid;
+  logic [HP_PORTS-1:0][1:0] m_axi_rresp;
+  logic [HP_PORTS-1:0] m_axi_rlast;
+  logic [HP_PORTS-1:0] m_axi_rvalid;
+  logic [HP_PORTS-1:0] m_axi_rready;
   logic [11:0] s_axi_awaddr = '0;
   logic s_axi_awvalid = '0;
   logic s_axi_awready;
@@ -61,7 +61,7 @@ module tb_ps_core #(
   logic [1:0] s_axi_rresp;
   logic s_axi_rvalid;
   logic s_axi_rready = '0;
-  otpu_zu3eg_accel #(.D(D), .MCOLS(MCOLS), .ACT_BLOCKS(ACT_BLOCKS),
+  otpu_zu3eg_accel #(.HP_PORTS(HP_PORTS), .D(D), .MCOLS(MCOLS), .ACT_BLOCKS(ACT_BLOCKS),
                       .ACT_ROWS(ACT_ROWS), .MXU_E(MXU_E), .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
                       .MEMORY_STATS(1), .BRIDGE_READ_DEPTH(READ_DEPTH),
                       .TMEM_NSB(TMEM_NSB), .TMEM_SBH(TMEM_SBH),
@@ -73,11 +73,16 @@ module tb_ps_core #(
                       .BRIDGE_B_DEPTH(READ_DEPTH > 8 ? READ_DEPTH : 8),
                       .BRIDGE_READ_CHUNKS(READ_CHUNKS)) dut (.*);
   int expected_pressure = 0, expected_starve = 0, expected_either = 0;
+  int expected_read_beats [HP_PORTS], expected_write_beats [HP_PORTS];
   int profile_mxu = 0, profile_vpu = 0, profile_dma = 0, profile_quant = 0;
   int profile_mxu_vpu = 0, profile_dma_vpu = 0;
   int profile_vpu_deny = 0, profile_vpu_replay = 0, profile_quant_deny = 0;
   always @(posedge clk) if (dut.run && !dut.halted) begin
     bit mb, vb, db;
+    for (int p = 0; p < HP_PORTS; p++) begin
+      expected_read_beats[p] += int'(m_axi_rvalid[p] && m_axi_rready[p]);
+      expected_write_beats[p] += int'(m_axi_wvalid[p] && m_axi_wready[p]);
+    end
     mb = dut.u_core.u_slice.u_seq.uq_h[otpu_pkg::U_MXU] != dut.u_core.u_slice.u_seq.uq_t[otpu_pkg::U_MXU];
     vb = dut.u_core.u_slice.u_seq.uq_h[otpu_pkg::U_VPU] != dut.u_core.u_slice.u_seq.uq_t[otpu_pkg::U_VPU];
     db = dut.u_core.u_slice.u_seq.uq_h[otpu_pkg::U_DMA] != dut.u_core.u_slice.u_seq.uq_t[otpu_pkg::U_DMA];
@@ -104,11 +109,11 @@ module tb_ps_core #(
     previous_starve = dut.u_core.u_slice.mxu_starve;
   end
   wire wr_idle = dut.wr_idle;
-  otpu_ps_axi_mem #(.WORDS(WORDS), .READ_DEPTH(READ_DEPTH), .READ_LATENCY(READ_LATENCY),
+  otpu_ps_multi_mem #(.HP_PORTS(HP_PORTS), .WORDS(WORDS), .READ_DEPTH(READ_DEPTH), .READ_LATENCY(READ_LATENCY),
                    .WRITE_DEPTH(WRITE_DEPTH),
                    .DATA_WIDTH(AXI_DATA_WIDTH), .BASE(40'h10000000)) memory_model (
     .clk, .rst(!aresetn), .wr_idle,
-    .hold_reads(1'b0), .hold_b(1'b0), .inject_b_error(1'b0), .inject_r_error(1'b0),
+    .hold_bulk(1'b0), .hold_reads(1'b0), .hold_b(1'b0), .inject_b_error(1'b0), .inject_r_error(1'b0),
     .read_bursts(), .max_read_pending(), .cycles(), .*
   );
 
@@ -158,6 +163,16 @@ module tb_ps_core #(
     if (status != expected_starve) $fatal(1, "starvation counter %d expected %d", status, expected_starve);
     read_reg(12'h30c, status);
     if (status != expected_either) $fatal(1, "union counter %d expected %d", status, expected_either);
+    read_reg(12'h310, status);
+    if (status != 32'h4d485031) $fatal(1, "multi-HP counter signature");
+    read_reg(12'h314, status);
+    if (status != HP_PORTS) $fatal(1, "multi-HP port count");
+    for (int p = 0; p < HP_PORTS; p++) begin
+      read_reg(12'(12'h320+8*p), status);
+      if (status != expected_read_beats[p] || status == 0) $fatal(1, "HP read counter p=%0d", p);
+      read_reg(12'(12'h324+8*p), status);
+      if (status != expected_write_beats[p]) $fatal(1, "HP write counter p=%0d", p);
+    end
     write_reg(12'h008, 0);
     repeat (8) @(negedge clk);
     read_reg(12'h30c, status);

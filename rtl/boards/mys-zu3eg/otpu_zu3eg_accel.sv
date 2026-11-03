@@ -2,6 +2,7 @@
 // All ports here use core_clk; IP Integrator converts M_AXI into the HP clock domain.
 module otpu_zu3eg_accel #(
   parameter int D = 128,
+  parameter int HP_PORTS = 2,
   parameter int AXI_DATA_WIDTH = 256,
   parameter bit MEMORY_STATS = 1'b0,
   parameter bit SEQ_FP_PIPE = 1'b0,
@@ -43,79 +44,79 @@ module otpu_zu3eg_accel #(
      X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)
   input logic aresetn,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI AWADDR" *)
-  output logic [39:0] m_axi_awaddr,
+  output logic [HP_PORTS-1:0][39:0] m_axi_awaddr,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI AWLEN" *)
-  output logic [7:0] m_axi_awlen,
+  output logic [HP_PORTS-1:0][7:0] m_axi_awlen,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI AWSIZE" *)
-  output logic [2:0] m_axi_awsize,
+  output logic [HP_PORTS-1:0][2:0] m_axi_awsize,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI AWBURST" *)
-  output logic [1:0] m_axi_awburst,
+  output logic [HP_PORTS-1:0][1:0] m_axi_awburst,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI AWID" *)
-  output logic [5:0] m_axi_awid,
+  output logic [HP_PORTS-1:0][5:0] m_axi_awid,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI AWLOCK" *)
-  output logic m_axi_awlock,
+  output logic [HP_PORTS-1:0] m_axi_awlock,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI AWCACHE" *)
-  output logic [3:0] m_axi_awcache,
+  output logic [HP_PORTS-1:0][3:0] m_axi_awcache,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI AWPROT" *)
-  output logic [2:0] m_axi_awprot,
+  output logic [HP_PORTS-1:0][2:0] m_axi_awprot,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI AWQOS" *)
-  output logic [3:0] m_axi_awqos,
+  output logic [HP_PORTS-1:0][3:0] m_axi_awqos,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI AWVALID" *)
-  output logic m_axi_awvalid,
+  output logic [HP_PORTS-1:0] m_axi_awvalid,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI AWREADY" *)
-  input logic m_axi_awready,
+  input logic [HP_PORTS-1:0] m_axi_awready,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI WDATA" *)
-  output logic [AXI_DATA_WIDTH-1:0] m_axi_wdata,
+  output logic [HP_PORTS-1:0][AXI_DATA_WIDTH-1:0] m_axi_wdata,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI WSTRB" *)
-  output logic [AXI_DATA_WIDTH/8-1:0] m_axi_wstrb,
+  output logic [HP_PORTS-1:0][AXI_DATA_WIDTH/8-1:0] m_axi_wstrb,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI WLAST" *)
-  output logic m_axi_wlast,
+  output logic [HP_PORTS-1:0] m_axi_wlast,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI WVALID" *)
-  output logic m_axi_wvalid,
+  output logic [HP_PORTS-1:0] m_axi_wvalid,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI WREADY" *)
-  input logic m_axi_wready,
+  input logic [HP_PORTS-1:0] m_axi_wready,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI BID" *)
-  input logic [5:0] m_axi_bid,
+  input logic [HP_PORTS-1:0][5:0] m_axi_bid,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI BRESP" *)
-  input logic [1:0] m_axi_bresp,
+  input logic [HP_PORTS-1:0][1:0] m_axi_bresp,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI BVALID" *)
-  input logic m_axi_bvalid,
+  input logic [HP_PORTS-1:0] m_axi_bvalid,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI BREADY" *)
-  output logic m_axi_bready,
+  output logic [HP_PORTS-1:0] m_axi_bready,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARADDR" *)
-  output logic [39:0] m_axi_araddr,
+  output logic [HP_PORTS-1:0][39:0] m_axi_araddr,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARLEN" *)
-  output logic [7:0] m_axi_arlen,
+  output logic [HP_PORTS-1:0][7:0] m_axi_arlen,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARSIZE" *)
-  output logic [2:0] m_axi_arsize,
+  output logic [HP_PORTS-1:0][2:0] m_axi_arsize,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARBURST" *)
-  output logic [1:0] m_axi_arburst,
+  output logic [HP_PORTS-1:0][1:0] m_axi_arburst,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARID" *)
-  output logic [5:0] m_axi_arid,
+  output logic [HP_PORTS-1:0][5:0] m_axi_arid,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARLOCK" *)
-  output logic m_axi_arlock,
+  output logic [HP_PORTS-1:0] m_axi_arlock,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARCACHE" *)
-  output logic [3:0] m_axi_arcache,
+  output logic [HP_PORTS-1:0][3:0] m_axi_arcache,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARPROT" *)
-  output logic [2:0] m_axi_arprot,
+  output logic [HP_PORTS-1:0][2:0] m_axi_arprot,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARQOS" *)
-  output logic [3:0] m_axi_arqos,
+  output logic [HP_PORTS-1:0][3:0] m_axi_arqos,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARVALID" *)
-  output logic m_axi_arvalid,
+  output logic [HP_PORTS-1:0] m_axi_arvalid,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARREADY" *)
-  input logic m_axi_arready,
+  input logic [HP_PORTS-1:0] m_axi_arready,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RDATA" *)
-  input logic [AXI_DATA_WIDTH-1:0] m_axi_rdata,
+  input logic [HP_PORTS-1:0][AXI_DATA_WIDTH-1:0] m_axi_rdata,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RID" *)
-  input logic [5:0] m_axi_rid,
+  input logic [HP_PORTS-1:0][5:0] m_axi_rid,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RRESP" *)
-  input logic [1:0] m_axi_rresp,
+  input logic [HP_PORTS-1:0][1:0] m_axi_rresp,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RLAST" *)
-  input logic m_axi_rlast,
+  input logic [HP_PORTS-1:0] m_axi_rlast,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RVALID" *)
-  input logic m_axi_rvalid,
+  input logic [HP_PORTS-1:0] m_axi_rvalid,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RREADY" *)
-  output logic m_axi_rready,
+  output logic [HP_PORTS-1:0] m_axi_rready,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI AWADDR" *)
   input logic [11:0] s_axi_awaddr,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI AWVALID" *)
@@ -171,11 +172,15 @@ module otpu_zu3eg_accel #(
     // conditions, not a claim that all these cycles prevented other useful work.
     logic run_q, active_q, selected;
     logic [31:0] pressure, starvation, either_stall, read_value;
+    // Wire traffic at each independent AXI master, excluding program loading.
+    // Read bytes are exact; write beats include bytes disabled by WSTRB.
+    logic [31:0] read_beats [2], write_beats [2];
     always_ff @(posedge clk) begin
       if (!aresetn) begin
         run_q <= 1'b0; active_q <= 1'b0;
         pressure <= '0; starvation <= '0; either_stall <= '0;
         selected <= 1'b0; read_value <= '0;
+        for (int p = 0; p < 2; p++) begin read_beats[p] <= '0; write_beats[p] <= '0; end
       end else begin
         run_q <= run;
         // core_perf is one cycle late: qualify it with the previous RUN/HALT
@@ -188,13 +193,28 @@ module otpu_zu3eg_accel #(
           starvation <= starvation + 32'(memory_stall[1]);
           either_stall <= either_stall + 32'(|memory_stall);
         end
+        for (int p = 0; p < HP_PORTS; p++) begin
+          if (run && !run_q) begin read_beats[p] <= '0; write_beats[p] <= '0; end
+          else if (run && !halted) begin
+            read_beats[p] <= read_beats[p] + 32'(m_axi_rvalid[p] && m_axi_rready[p]);
+            write_beats[p] <= write_beats[p] + 32'(m_axi_wvalid[p] && m_axi_wready[p]);
+          end
+        end
         if (s_axi_arvalid && s_axi_arready) begin
-          selected <= s_axi_araddr >= 12'h300 && s_axi_araddr <= 12'h30c;
+          selected <= s_axi_araddr >= 12'h300 && s_axi_araddr <= 12'h334;
           case (s_axi_araddr[11:2])
             10'h0c0: read_value <= 32'h4d535431; // MST1: counter definition version
             10'h0c1: read_value <= pressure;
             10'h0c2: read_value <= starvation;
             10'h0c3: read_value <= either_stall;
+            10'h0c4: read_value <= 32'h4d485031; // MHP1
+            10'h0c5: read_value <= 32'(HP_PORTS);
+            10'h0c8: read_value <= read_beats[0];
+            10'h0c9: read_value <= write_beats[0];
+            10'h0ca: read_value <= read_beats[1];
+            10'h0cb: read_value <= write_beats[1];
+            10'h0cc: read_value <= '0; // reserved
+            10'h0cd: read_value <= '0; // reserved
             default: read_value <= '0;
           endcase
         end
@@ -222,7 +242,7 @@ module otpu_zu3eg_accel #(
     .b_rdy, .b_rvalid, .b_rtag, .b_rdata, .wr_idle, .rd_idle,
     .halted, .error(core_error), .wait_to, .a_inval, .icount, .memory_stall
   );
-  otpu_ps_dram #(.D(D), .AXI_DATA_WIDTH(AXI_DATA_WIDTH), .READ_DEPTH(BRIDGE_READ_DEPTH),
+  otpu_ps_dram_multi #(.HP_PORTS(HP_PORTS), .D(D), .AXI_DATA_WIDTH(AXI_DATA_WIDTH), .READ_DEPTH(BRIDGE_READ_DEPTH),
     .B_DEPTH(BRIDGE_B_DEPTH), .READ_CHUNKS(BRIDGE_READ_CHUNKS),
     .A_CACHE_LINES(BRIDGE_A_CACHE_LINES), .WRITE_DEPTH(BRIDGE_WRITE_DEPTH)) u_ddr (
     .clk, .rst(!aresetn), .a_flush(a_inval || !run),

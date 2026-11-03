@@ -91,7 +91,7 @@ def test_ps_bridge_pipelines_writes_and_keeps_read_after_write_fences(width, wri
                                         ("mys-zu3eg:d128-m1-r4-cl2", "int4")])
 @pytest.mark.parametrize('combined', [False, True])
 @pytest.mark.parametrize('fp_pipe', [False, True])
-def test_ps_board_kernel_matches_isa(tmp_path, target, fmt, combined, fp_pipe):
+def test_ps_board_kernel_matches_isa(tmp_path, target, fmt, combined, fp_pipe, hp_ports=1):
     import sys
     from dataclasses import replace
 
@@ -106,15 +106,15 @@ def test_ps_board_kernel_matches_isa(tmp_path, target, fmt, combined, fp_pipe):
     from test_kernels import mlp_args
 
     cfg = replace(T.config(target), DRAM_BYTES=1 << 20)
-    arguments, _ = mlp_args(np.random.default_rng(42), M=4 if cfg.ACT_ROWS == 4 else 1, H=128, Fd=256)
+    arguments, _ = mlp_args(np.random.default_rng(42), M=min(cfg.act_rows, 4), H=128, Fd=256)
     for value in arguments.values():
         if isinstance(value, Weight):
             value.fmt = fmt
     compiled, images = compile_kernel(mlp, cfg, **arguments)
-    _compare_ps_core(tmp_path, target, cfg, compiled.programs, images, combined, fp_pipe)
+    _compare_ps_core(tmp_path, target, cfg, compiled.programs, images, combined, fp_pipe, hp_ports=hp_ports)
 
 
-def _compare_ps_core(tmp_path, target, cfg, programs, images, combined, fp_pipe, program_at=None):
+def _compare_ps_core(tmp_path, target, cfg, programs, images, combined, fp_pipe, program_at=None, hp_ports=1):
     import numpy as np
     from opentpu import isa as I, target as T
     from opentpu.isasim import Machine
@@ -128,7 +128,8 @@ def _compare_ps_core(tmp_path, target, cfg, programs, images, combined, fp_pipe,
     image.view('<u4').astype('>u4').tofile(tmp_path / 'input.bin')
     sources = [rtlsim.RTL / f for f in T.CORE + T.TECH['generic'] + [
         'asic/otpu_asic_top.sv', 'shell/otpu_ctrl.sv',
-        'boards/mys-zu3eg/otpu_ps_dram.sv', 'boards/mys-zu3eg/otpu_zu3eg_accel.sv']]
+        'boards/mys-zu3eg/otpu_ps_dram.sv', 'boards/mys-zu3eg/otpu_ps_dram_multi.sv',
+        'boards/mys-zu3eg/otpu_zu3eg_accel.sv']]
     flags = list(rtlsim.VFLAGS)
     try:
         rtlsim.VFLAGS[rtlsim.VFLAGS.index('-j') + 1] = '2'
@@ -139,10 +140,11 @@ def _compare_ps_core(tmp_path, target, cfg, programs, images, combined, fp_pipe,
         parameters['VPU_CL'] = T.load(target).uarch['VPU_CL']
         parameters['WIN'] = T.load(target).uarch['WIN']
         parameters['SEQ_FP_PIPE'] = int(fp_pipe)
+        parameters['HP_PORTS'] = hp_ports
         if combined:
             parameters.update(READ_DEPTH=16, READ_CHUNKS=4)
         executable = rtlsim.build('tb_ps_core', sources + [
-            rtlsim.TB / 'otpu_ps_axi_mem.sv', rtlsim.TB / 'tb_ps_core.sv'], parameters)
+            rtlsim.TB / 'otpu_ps_multi_mem.sv', rtlsim.TB / 'tb_ps_core.sv'], parameters)
         result = rtlsim.run_sim([str(executable), f'+dir={tmp_path}',
                                 f'+program_addr={program_at}',
                                 f'+program_n={len(programs[0])}'], timeout=60)
@@ -161,7 +163,7 @@ def _compare_ps_core(tmp_path, target, cfg, programs, images, combined, fp_pipe,
 
 @pytest.mark.parametrize('seed', range(4))
 @pytest.mark.parametrize('fp_pipe', [False, True])
-def test_ps_scheduler_pipeline_hazards_and_control(tmp_path, seed, fp_pipe):
+def test_ps_scheduler_pipeline_hazards_and_control(tmp_path, seed, fp_pipe, hp_ports=1):
     from dataclasses import replace
     import numpy as np
     from opentpu import isa as I, target as T
@@ -179,4 +181,34 @@ def test_ps_scheduler_pipeline_hazards_and_control(tmp_path, seed, fp_pipe):
     suffix = [I.ld(0xf4000, 12000, 1), I.rld(7, 12000, raw=True),
               I.st(SCRATCH + 4096, 8192, 8, ra=7), I.halt()]
     _compare_ps_core(tmp_path, target, cfg, [prefix + body + suffix], images, True, fp_pipe,
-                     program_at=0xf8000)
+                     program_at=0xf8000, hp_ports=hp_ports)
+
+
+@pytest.mark.parametrize('hp_ports', [2])
+@pytest.mark.parametrize('fmt', ['int4', 'int8'])
+def test_ps_multi_port_kernel_matches_isa(tmp_path, hp_ports, fmt):
+    test_ps_board_kernel_matches_isa(tmp_path, 'mys-zu3eg:d64-m2-r6-cl2', fmt,
+                                    combined=True, fp_pipe=True, hp_ports=hp_ports)
+
+
+@pytest.mark.parametrize('hp_ports', [2])
+def test_ps_multi_port_dependencies_match_isa(tmp_path, hp_ports):
+    test_ps_scheduler_pipeline_hazards_and_control(tmp_path, seed=0, fp_pipe=True,
+                                                 hp_ports=hp_ports)
+
+
+@pytest.mark.parametrize('hp_ports', [2])
+def test_ps_multi_port_protocol(tmp_path, hp_ports):
+    sources = [rtlsim.RTL/'boards/mys-zu3eg/otpu_ps_dram.sv',
+               rtlsim.RTL/'boards/mys-zu3eg/otpu_ps_dram_multi.sv',
+               rtlsim.TB/'otpu_ps_multi_mem.sv', rtlsim.TB/'tb_ps_multi.sv']
+    flags = list(rtlsim.VFLAGS)
+    try:
+        rtlsim.VFLAGS[rtlsim.VFLAGS.index('-j') + 1] = '2'
+        exe = rtlsim.build('tb_ps_multi', sources, {'HP_PORTS': hp_ports})
+        result = rtlsim.run_sim([str(exe)], timeout=45)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert 'PS_DRAM_PROTOCOL_PASS' in result.stdout
+        assert 'INDEPENDENT_METADATA_PASS' in result.stdout
+    finally:
+        rtlsim.VFLAGS[:] = flags

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from opentpu import target as T
 
-from .settings import AXI_DATA_WIDTH, CORE_MHZ, DEPLOY, MEM_MHZ, ROOT, TARGET
+from .settings import AXI_DATA_WIDTH, CORE_MHZ, DEPLOY, HP_PORTS, MEM_MHZ, ROOT, TARGET
 
 
 def main():
@@ -21,6 +21,8 @@ def main():
                         help='HP AXI clock; physical DDR is unchanged')
     parser.add_argument('--axi-data-width', type=int, choices=(128, 256), default=AXI_DATA_WIDTH,
                         help='bridge AXI width; downsizing to the 128-bit HP port runs at the HP clock')
+    parser.add_argument('--hp-ports', type=int, choices=(1, 2), default=HP_PORTS,
+                        help='2: HP0 bulk + HP1 metadata (default); 1: legacy HP0; HP2/HP3 disabled')
     parser.add_argument('--prepare-only', action='store_true', help='write build parameters without starting Vivado')
     parser.add_argument('--memory-stats', action='store_true', help='add per-run memory demand-stall counters')
     parser.add_argument('--scheduler-pipeline', action='store_true',
@@ -56,7 +58,8 @@ def main():
     if 32 * options.scale_cache_lines // (options.axi_data_width//8) > 8:
         parser.error('eight scale-cache lines require the 256-bit AXI interface')
     files = T.CORE + T.TECH['xilinxus'] + ['asic/otpu_asic_top.sv', 'shell/otpu_ctrl.sv',
-            'boards/mys-zu3eg/otpu_ps_dram.sv', 'boards/mys-zu3eg/otpu_zu3eg_accel.sv',
+            'boards/mys-zu3eg/otpu_ps_dram.sv', 'boards/mys-zu3eg/otpu_ps_dram_multi.sv',
+            'boards/mys-zu3eg/otpu_zu3eg_accel.sv',
             'boards/mys-zu3eg/otpu_zu3eg_wrapper.v']
     (out / 'sources.tcl').write_text('set rtl_sources {' + ' '.join(files) + '}\n')
     parameters = {k: T.rtl_params(target)[k] for k in (
@@ -65,6 +68,7 @@ def main():
         'RPB', 'WPB', 'TMEM_NSB', 'TMEM_SBP', 'TMEM_SBH', 'TMEM_RPL', 'TMEM_TDP',
         'TMEM_GST', 'TMEM_PMP', 'TMEM_PRK', 'TMEM_SDM') if k in T.rtl_params(target)}
     parameters.update(AXI_DATA_WIDTH=options.axi_data_width, CORE_KHZ=round(options.core_mhz * 1000), ARCH_HASH=T.arch_hash(cfg))
+    parameters['HP_PORTS'] = options.hp_ports
     parameters['MEMORY_STATS'] = int(options.memory_stats)
     parameters['SEQ_FP_PIPE'] = int(options.scheduler_pipeline)
     parameters['BRIDGE_A_CACHE_LINES'] = options.scale_cache_lines
@@ -72,7 +76,7 @@ def main():
     parameters.update(BRIDGE_READ_DEPTH=options.read_depth, BRIDGE_B_DEPTH=options.read_depth,
                       BRIDGE_READ_CHUNKS=options.read_chunks)
     (out / 'build_params.tcl').write_text(
-        f'set core_mhz {options.core_mhz}\nset mem_mhz {mem_mhz}\nset axi_data_width {options.axi_data_width}\n' +
+        f'set core_mhz {options.core_mhz}\nset mem_mhz {mem_mhz}\nset axi_data_width {options.axi_data_width}\nset hp_ports {options.hp_ports}\n' +
         f'set separate_mmcm {int(options.separate_mmcm)}\nset implementation_strategy {{{options.strategy}}}\n' +
         'set accelerator_parameters {' + ' '.join(
             f'CONFIG.{k} {int(v)}' for k, v in parameters.items()) + '}\n')
@@ -85,8 +89,9 @@ def main():
         'implementation_strategy': options.strategy,
         'ps_pl0_input_mhz': 100, 'input_jitter_ns': 0.100, 'control_base': '0x80000000',
         'ddr_base': '0x10000000', 'ps_boot': 'preserve existing initialized PS DDR; PL-only programming',
-        'memory_bridge': f'queued {options.axi_data_width}-bit bridge, 128-bit HP0, up to {options.read_depth} reads outstanding, up to {options.read_chunks} chunks per read burst, independent writes, {32*options.scale_cache_lines}-byte scale cache',
+        'memory_bridge': f'queued {options.axi_data_width}-bit bridge, 128-bit HP ports {[0, 1][:options.hp_ports]}, up to {options.read_depth} reads outstanding, up to {options.read_chunks} chunks per read burst, independent writes, {32*options.scale_cache_lines}-byte scale cache',
         'read_depth': options.read_depth, 'read_chunks': options.read_chunks,
+        'hp_ports': [0, 1][:options.hp_ports],
         'scale_cache_lines': options.scale_cache_lines,
         'write_depth': options.write_depth,
         'bridge_axi_bits': options.axi_data_width, 'hp_axi_bits': 128,

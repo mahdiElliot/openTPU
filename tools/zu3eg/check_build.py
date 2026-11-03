@@ -9,52 +9,62 @@ from pathlib import Path
 def memory_path(directory, configuration):
     """Check the implemented BD, not only the width requested in metadata."""
     width = configuration.get('bridge_axi_bits', 128)
-    if width == 128:
-        return {'passed': True, 'bridge_bits': 128, 'hp_bits': 128}
+    ports = configuration.get('hp_ports', [0])
     bd = directory / 'project/opentpu_zu3eg.srcs/sources_1/bd/system/system.bd'
-    result = {'passed': False, 'bridge_bits': width, 'hp_bits': 128, 'errors': []}
+    result = {'passed': False, 'bridge_bits': width, 'hp_bits': 128,
+              'hp_ports': ports, 'errors': []}
     if not bd.is_file():
         result['errors'].append('Generated block design is missing')
         return result
     design = json.loads(bd.read_text())['design']
     components = design['components']
     errors = result['errors']
-    if 'write_depth' in configuration:
-        interface = components.get('accelerator', {}).get('interface_ports', {}).get('M_AXI', {})
-        credits = interface.get('parameters', {})
-        for key, wanted in [('NUM_READ_OUTSTANDING', configuration['read_depth']),
-                            ('NUM_WRITE_OUTSTANDING', configuration['write_depth'])]:
-            if int(credits.get(key, {}).get('value', '0')) < wanted:
-                errors.append(f'AXI metadata {key} understates the bridge credits')
+    if ports not in ([0], [0, 1]):
+        errors.append('Only HP0 or HP0/HP1 are supported')
+    if any(f'ps/S_AXI_HP{hp}_FPD' in net['interface_ports']
+           for net in design['interface_nets'].values() for hp in (2, 3)):
+        errors.append('HP2 and HP3 must remain unused')
 
     def parameter(component, name):
         return components.get(component, {}).get('parameters', {}).get(name, {}).get('value')
 
     def connected(left, right, interfaces=False):
-        key, ports = ('interface_nets', 'interface_ports') if interfaces else ('nets', 'ports')
-        return any(left in net[ports] and right in net[ports] for net in design[key].values())
+        key, names = ('interface_nets', 'interface_ports') if interfaces else ('nets', 'ports')
+        return any(left in net[names] and right in net[names] for net in design[key].values())
 
-    if (parameter('memory_width_converter', 'SI_DATA_WIDTH') != str(width) or
-        parameter('memory_width_converter', 'MI_DATA_WIDTH') != '128'):
-        errors.append('Downsizer widths do not match the bridge and HP port')
     dual = configuration.get('mem_mhz', configuration['core_mhz']) != configuration['core_mhz']
-    source = 'accelerator/M_AXI'
-    if dual:
-        if parameter('memory_clock_converter', 'DATA_WIDTH') != str(width):
-            errors.append('Clock crossing is not wide enough')
-        if not connected(source, 'memory_clock_converter/S_AXI', True):
-            errors.append('The bridge must connect to the wide clock crossing first')
-        source = 'memory_clock_converter/M_AXI'
-    if not connected(source, 'memory_width_converter/S_AXI', True):
-        errors.append('Downsizing must follow the wide crossing')
-    if not connected('memory_width_converter/M_AXI', 'ps/S_AXI_HP0_FPD', True):
-        errors.append('Downsizer output does not connect to HP0')
     clock = ('memory_clocks/clk_out1' if configuration.get('separate_mmcm') else
              'clocks/clk_out2') if dual else 'clocks/clk_out1'
-    if not connected(clock, 'memory_width_converter/s_axi_aclk'):
-        errors.append('Downsizer is not clocked in the HP domain')
-    if not connected(clock, 'ps/saxihp0_fpd_aclk'):
-        errors.append('HP0 uses the wrong clock')
+    for hp, bus in zip(ports, ('M_AXI', 'M_META_AXI')):
+        suffix = '' if hp == 0 else f'_hp{hp}'
+        crossing, downsizer = 'memory_clock_converter'+suffix, 'memory_width_converter'+suffix
+        if 'write_depth' in configuration:
+            interface = components.get('accelerator', {}).get('interface_ports', {}).get(bus, {})
+            credits = interface.get('parameters', {})
+            for key, wanted in [('NUM_READ_OUTSTANDING', configuration['read_depth']),
+                                ('NUM_WRITE_OUTSTANDING', configuration['write_depth'])]:
+                if int(credits.get(key, {}).get('value', '0')) < wanted:
+                    errors.append(f'{bus} metadata {key} understates the bridge credits')
+        source = 'accelerator/'+bus
+        if dual:
+            if parameter(crossing, 'DATA_WIDTH') != str(width):
+                errors.append(f'HP{hp}: clock crossing is not wide enough')
+            if not connected(source, crossing+'/S_AXI', True):
+                errors.append(f'HP{hp}: bridge must connect to its independent wide clock crossing')
+            source = crossing+'/M_AXI'
+        if width != 128:
+            if (parameter(downsizer, 'SI_DATA_WIDTH') != str(width) or
+                parameter(downsizer, 'MI_DATA_WIDTH') != '128'):
+                errors.append(f'HP{hp}: downsizer widths do not match the bridge and HP port')
+            if not connected(source, downsizer+'/S_AXI', True):
+                errors.append(f'HP{hp}: downsizing must follow the wide crossing')
+            if not connected(clock, downsizer+'/s_axi_aclk'):
+                errors.append(f'HP{hp}: downsizer is not clocked in the HP domain')
+            source = downsizer+'/M_AXI'
+        if not connected(source, f'ps/S_AXI_HP{hp}_FPD', True):
+            errors.append(f'HP{hp}: memory path connects to the wrong PS port')
+        if not connected(clock, f'ps/saxihp{hp}_fpd_aclk'):
+            errors.append(f'HP{hp}: wrong interface clock')
     result['passed'] = not errors
     return result
 
