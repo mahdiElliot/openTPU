@@ -1150,7 +1150,7 @@ class Image(EmbedHost):
             mtp["hidden"] = True
         if not nest:
             mtp["nest"] = False
-        return [qwen35_rows.trace(self.cfg, s, {"m": self.descriptors(s, slot), "p0": rows[0][1],
+        return [trace_fit(qwen35_rows, self.cfg, s, lambda s=s: {"m": self.descriptors(s, slot), "p0": rows[0][1],
                                                 "R": len(rows), "logit_rows": list(logit_rows),
                                                 "block": block, **mtp,
                                                 **_tokens_arg(self, tokens, rows)}).finish()

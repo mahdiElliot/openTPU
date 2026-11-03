@@ -1355,6 +1355,8 @@ module otpu_mxu
     always @(posedge clk) if (rst) rst_seen <= 1'b1;
     always @(posedge clk)
       if (!rst && rst_seen) begin
+        logic [TLANES-1:0][31:0] expected_rb;
+        expected_rb = bk_ad(rq_ad, rq_en);
         if (push && tq_n == 2'd3) $fatal(1, "otpu_mxu: TMEM write queue overflow");
         if (rq_any != (|rq_en)) $fatal(1, "otpu_mxu: rq_any is not the request register's");
         if (tq_z != (tq_n == 2'd0)) $fatal(1, "otpu_mxu: tq_z is not the queue's");
@@ -1365,9 +1367,9 @@ module otpu_mxu
         if (rb_v != bk_en(rq_ad, rq_en)) $fatal(1, "otpu_mxu: rb_v is not the request register's banks");
         if (rb_q != bk_en(rq_ad, t_ren_q)) $fatal(1, "otpu_mxu: rb_q is not t_ren_q's banks");
         for (int b = 0; b < TLANES; b++)
-          if (rb_v[b] && rb_a[b] != bk_ad(rq_ad, rq_en)[b])
+          if (rb_v[b] && rb_a[b] != expected_rb[b])
             $fatal(1, "otpu_mxu: rb_a[%0d] %0h is not the request register's %0h", b, rb_a[b],
-                   bk_ad(rq_ad, rq_en)[b]);
+                   expected_rb[b]);
         // TMEM loses only a read the MXU asked this cycle (and the slice took) or its replay
         if (t_lost && !((|t_ren) && rd) && !lost_q) $fatal(1, "otpu_mxu: TMEM lost a read not asked");
       end

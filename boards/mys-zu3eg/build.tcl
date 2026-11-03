@@ -22,6 +22,7 @@ set_property -dict [list \
   CONFIG.PSU__CRL_APB__PL0_REF_CTRL__FREQMHZ {100}] $ps
 set clk [create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz:6.0 clocks]
 set_property -dict [list CONFIG.PRIM_IN_FREQ {100.000} \
+  CONFIG.PRIM_SOURCE {No_buffer} \
   CONFIG.CLKOUT1_REQUESTED_OUT_FREQ $core_mhz \
   CONFIG.USE_RESET {false}] $clk
 set all_locked [get_bd_pins clocks/locked]
@@ -31,6 +32,7 @@ if {$mem_mhz != $core_mhz && !$separate_mmcm} {
 if {$mem_mhz != $core_mhz && $separate_mmcm} {
   set mem_clk [create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz:6.0 memory_clocks]
   set_property -dict [list CONFIG.PRIM_IN_FREQ {100.000} \
+    CONFIG.PRIM_SOURCE {No_buffer} \
     CONFIG.CLKOUT1_REQUESTED_OUT_FREQ $mem_mhz CONFIG.USE_RESET {false}] $mem_clk
   connect_bd_net [get_bd_pins ps/pl_clk0] [get_bd_pins memory_clocks/clk_in1]
   set locks [create_bd_cell -type ip -vlnv xilinx.com:ip:util_vector_logic:2.0 clock_locks]
@@ -44,6 +46,8 @@ set invert [create_bd_cell -type ip -vlnv xilinx.com:ip:util_vector_logic:2.0 in
 set_property -dict [list CONFIG.C_OPERATION {not} CONFIG.C_SIZE {1}] $invert
 set core [create_bd_cell -type module -reference otpu_zu3eg_wrapper accelerator]
 set_property -dict $accelerator_parameters $core
+# Module-reference AXI capabilities come from the wrapper's HDL attributes.
+# BD considers those properties read-only; check_build verifies the generated BD.
 set control [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect:2.1 control]
 set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {1}] $control
 connect_bd_net [get_bd_pins ps/pl_clk0] [get_bd_pins clocks/clk_in1]
@@ -104,6 +108,14 @@ make_wrapper -files [get_files system.bd] -top
 add_files [file join $out project/opentpu_zu3eg.gen/sources_1/bd/system/hdl/system_wrapper.v]
 set_property top system_wrapper [current_fileset]
 update_compile_order -fileset sources_1
+# The PS clock is already buffered. Keep its primary clock and preserve the
+# previous input-jitter budget instead of redefining clocks at MMCM inputs.
+set clock_constraints [file join $out board_clock.xdc]
+set cf [open $clock_constraints w]
+puts $cf {set_input_jitter [get_clocks clk_pl_0] 0.100}
+close $cf
+add_files -fileset constrs_1 $clock_constraints
+set_property PROCESSING_ORDER LATE [get_files $clock_constraints]
 write_bd_tcl -force [file join $out system_bd.tcl]
 launch_runs synth_1 -jobs 2
 wait_on_run synth_1
@@ -117,6 +129,8 @@ report_timing_summary -delay_type min_max -report_unconstrained -file [file join
 report_utilization -file [file join $out utilization.rpt]
 report_drc -file [file join $out drc.rpt]
 report_cdc -file [file join $out cdc.rpt]
+report_methodology -file [file join $out methodology.rpt]
+report_property -file [file join $out clock_root.rpt] [get_clocks clk_pl_0]
 set clock_report [open [file join $out clocks.csv] w]
 puts $clock_report "name,period_ns,mhz"
 foreach clock [get_clocks] {

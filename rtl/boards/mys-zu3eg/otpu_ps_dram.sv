@@ -3,13 +3,17 @@
 // AXI reads use one ID and return in issue order; B's tag follows its response.
 // A and B preserve read/write order within their own queue. Across ports, the
 // slice orders dependencies with wr_idle, as with otpu_native_dram. A write waits
-// for its port's older reads; its queue advances only after BRESP. Other ports'
-// independent reads may run beside it. Addresses at the core are WORDS.
+// for its port's older reads; younger reads stay fenced through BRESP. With
+// multiple write credits payload storage retires at WLAST while response tags
+// remain queued. Other ports' independent reads may run beside writes.
+// Addresses at the core are WORDS.
 module otpu_ps_dram #(
   parameter int D = 128,
   parameter int AXI_DATA_WIDTH = 256,
   parameter int READ_DEPTH = 8,
   parameter int READ_CHUNKS = 1,
+  parameter int A_CACHE_LINES = 1, // fetch 1/2/4/8 adjacent 32-byte scale lines
+  parameter int WRITE_DEPTH = 1, // ordered BRESP credits; one active W payload
   parameter int A_DEPTH = 4,
   parameter int B_DEPTH = 8,
   parameter int SW_DEPTH = 4,
@@ -59,10 +63,21 @@ module otpu_ps_dram #(
   localparam int GP = (READ_CHUNKS > 1) ? $clog2(READ_CHUNKS) : 1;
   localparam int GC = $clog2(READ_CHUNKS + 1);
   localparam int BF = $clog2(READ_DEPTH * READ_CHUNKS + 1);
+  localparam int AC_LG = 3 + $clog2(A_CACHE_LINES);
+  localparam int AIW = A_CACHE_LINES > 1 ? $clog2(A_CACHE_LINES) : 1;
+  localparam bit WPIPE = WRITE_DEPTH > 1;
+  localparam int WP = WPIPE ? $clog2(WRITE_DEPTH) : 1;
+  localparam int WC = $clog2(WRITE_DEPTH+1);
+  localparam int AWC = $clog2(A_DEPTH+WRITE_DEPTH+1);
+  localparam int BWC = $clog2(B_DEPTH+WRITE_DEPTH+1);
   initial begin
     if (!(AXI_DATA_WIDTH inside {128, 256}) || D*8 < AXI_DATA_WIDTH)
       $fatal(1, "PS bridge requires AXI_DATA_WIDTH=128/256 and D >= one AXI beat");
     if (!(D inside {32, 64, 128})) $fatal(1, "ZU3EG PS bridge requires D=32,64,128");
+    if (!(A_CACHE_LINES inside {1, 2, 4, 8}) || 32*A_CACHE_LINES/AXI_BYTES > 8)
+      $fatal(1, "Scale cache requires 1/2/4/8 lines and at most eight AXI beats");
+    if (WRITE_DEPTH < 1 || WRITE_DEPTH > 16 || (WRITE_DEPTH & (WRITE_DEPTH-1)) != 0)
+      $fatal(1, "Write credits must be a power of two from 1 through 16");
     if (!(READ_CHUNKS inside {1, 2, 4, 8}) || READ_CHUNKS * D / AXI_BYTES > 256 ||
         (READ_CHUNKS > 1 && BASE[11:0] != 0))
       $fatal(1, "Read grouping requires 1/2/4/8 chunks and a 4-KiB-aligned BASE");
@@ -120,17 +135,19 @@ module otpu_ps_dram #(
   // rather than sending duplicate AXI requests before it fills. This does not
   // prevent B from filling all READ_DEPTH read credits in the meantime.
   logic a_flight, a_cacheable;
-  logic [28:0] a_line, cache_line;
+  logic [31-AC_LG:0] a_line, cache_line;
+  logic [AIW-1:0] a_select;
   logic cache_valid;
-  logic [255:0] cache_data;
+  logic [256*A_CACHE_LINES-1:0] cache_data;
   logic [BF-1:0] b_flight;
   logic [AP:0] a_pending;
   logic [BP+RP+1:0] b_pending;
-  wire a_head_read = an != 0 && !aq[ah].we;
-  wire b_head_read = bn != 0 && !bq[bh].we;
+  logic [WC-1:0] a_wflight, b_wflight;
+  wire a_head_read = an != 0 && !aq[ah].we && (!WPIPE || a_wflight == 0);
+  wire b_head_read = bn != 0 && !bq[bh].we && (!WPIPE || b_wflight == 0);
   wire a_hit = a_head_read && !a_flight && !(ar_valid && !ar_port_b) &&
                cache_valid && !a_flush && !write_taken && wr_idle &&
-               cache_line == aq[ah].addr[31:3];
+               cache_line == aq[ah].addr[31:AC_LG];
 
   // A registered AR remains unchanged under backpressure. A single ID lets the
   // PS keep many reads in flight without a data reorder buffer. Credits reserve
@@ -148,7 +165,8 @@ module otpu_ps_dram #(
   // Include the current beat in the assembled response before its register write.
   always_comb begin
     rcomplete = rpayload;
-    rcomplete[AXI_DATA_WIDTH*rbeat +: AXI_DATA_WIDTH] = m_axi_rdata;
+    if (rq[rh].port_b)
+      rcomplete[AXI_DATA_WIDTH*rbeat +: AXI_DATA_WIDTH] = m_axi_rdata;
   end
   wire ar_fire = m_axi_arvalid && m_axi_arready;
   wire r_fire = m_axi_rvalid && m_axi_rready;
@@ -190,9 +208,16 @@ module otpu_ps_dram #(
   logic [D*8-1:0] wpayload;
   logic [D-1:0] wmask;
   logic [2:0] wbeat, wlast;
-  logic [AP:0] a_writes;
-  logic [BP:0] b_writes;
-  wire w_done = ws == W_RESP && m_axi_bvalid;
+  logic [AWC-1:0] a_writes;
+  logic [BWC-1:0] b_writes;
+  logic [1:0] wports [WRITE_DEPTH];
+  logic [WP-1:0] wh, wt;
+  logic [WC-1:0] wn;
+  wire w_address = m_axi_awvalid && m_axi_awready;
+  wire w_last_fire = ws == W_DATA && m_axi_wready && wbeat == wlast;
+  wire w_done = m_axi_bvalid && m_axi_bready;
+  wire [1:0] response_port = WPIPE ? wports[wh] : wport;
+  wire w_retire = WPIPE ? w_last_fire : w_done;
   wire [2:0] w_candidates = {bn != 0 && bq[bh].we && b_flight == 0 &&
                              gather_count == 0 && !(ar_valid && ar_port_b),
                              an != 0 && aq[ah].we && !a_flight, sn != 0};
@@ -206,7 +231,7 @@ module otpu_ps_dram #(
       if (!have_w && w_candidates[p]) begin have_w = 1'b1; pick_w = 2'(p); end
     end
   end
-  assign wr_idle = a_writes == 0 && b_writes == 0 && sn == 0 && ws == W_IDLE;
+  assign wr_idle = a_writes == 0 && b_writes == 0 && sn == 0 && ws == W_IDLE && (!WPIPE || wn == 0);
   assign m_axi_awvalid = !rst && ws == W_ADDR;
   assign m_axi_awaddr = waddr;
   assign m_axi_awlen = {5'd0, wlast};
@@ -214,7 +239,7 @@ module otpu_ps_dram #(
   assign m_axi_wdata = wpayload[AXI_DATA_WIDTH*wbeat +: AXI_DATA_WIDTH];
   assign m_axi_wstrb = wmask[AXI_BYTES*wbeat +: AXI_BYTES];
   assign m_axi_wlast = wbeat == wlast;
-  assign m_axi_bready = !rst && ws == W_RESP;
+  assign m_axi_bready = !rst && (WPIPE ? wn != 0 : ws == W_RESP);
   assign m_axi_awsize = 3'(AXI_SIZE);
   assign m_axi_arsize = 3'(AXI_SIZE);
   assign m_axi_awburst = 2'b01;
@@ -231,10 +256,10 @@ module otpu_ps_dram #(
   assign m_axi_arqos = '0;
 
   always_comb begin
-    a_pop = a_hit || (ar_fire && !ar_port_b) || (w_done && wport == W_A);
+    a_pop = a_hit || (ar_fire && !ar_port_b) || (w_retire && wport == W_A);
     b_pop = (READ_CHUNKS == 1 ? (ar_fire && ar_port_b) : gather_take) ||
-            (w_done && wport == W_B);
-    sw_pop = w_done && wport == W_SW;
+            (w_retire && wport == W_B);
+    sw_pop = w_retire && wport == W_SW;
   end
   always_ff @(posedge clk) begin
     if (a_push) aq[at] <= '{we:a_we, addr:a_addr, data:a_wdata, be:a_be};
@@ -243,7 +268,8 @@ module otpu_ps_dram #(
     if (sw_push) sq[st] <= '{addr:sw_addr, data:sw_wdata, be:sw_be};
     if (ar_fire) rq[rt] <= '{port_b:ar_port_b, tags:ar_tags,
                              chunks_last:ar_chunks_last, last:ar_last};
-    if (r_fire) rpayload[AXI_DATA_WIDTH*rbeat +: AXI_DATA_WIDTH] <= m_axi_rdata;
+    if (r_fire && rq[rh].port_b)
+      rpayload[AXI_DATA_WIDTH*rbeat +: AXI_DATA_WIDTH] <= m_axi_rdata;
   end
 
   always_ff @(posedge clk) begin
@@ -261,9 +287,10 @@ module otpu_ps_dram #(
       a_pending <= '0; b_pending <= '0; b_flight <= '0;
       a_writes <= '0; b_writes <= '0;
       a_flight <= 1'b0; a_cacheable <= 1'b0;
-      a_line <= '0; cache_valid <= 1'b0; cache_line <= '0;
+      a_line <= '0; a_select <= '0; cache_valid <= 1'b0; cache_line <= '0;
       a_rvalid <= 1'b0; b_rvalid <= 1'b0; b_rtag <= 1'b0;
       ws <= W_IDLE; wport <= W_SW; wnext <= W_SW;
+      wh <= '0; wt <= '0; wn <= '0; a_wflight <= '0; b_wflight <= '0;
       waddr <= '0; wbeat <= '0; wlast <= '0;
       error <= 1'b0;
     end else begin
@@ -280,8 +307,19 @@ module otpu_ps_dram #(
       sn <= sn + (SP+1)'(sw_push) - (SP+1)'(sw_pop);
       a_pending <= a_pending + (AP+1)'(a_push && !a_we) - (AP+1)'(a_done || a_hit);
       b_pending <= b_pending + (BP+RP+2)'(b_push && !b_we) - (BP+RP+2)'(b_done);
-      a_writes <= a_writes + (AP+1)'(a_push && a_we) - (AP+1)'(w_done && wport == W_A);
-      b_writes <= b_writes + (BP+1)'(b_push && b_we) - (BP+1)'(w_done && wport == W_B);
+      a_writes <= a_writes + AWC'(a_push && a_we) - AWC'(w_done && response_port == W_A);
+      b_writes <= b_writes + BWC'(b_push && b_we) - BWC'(w_done && response_port == W_B);
+      if (WPIPE) begin
+        // AW/W stay ordered on one ID. Retire payload storage after WLAST,
+        // retaining each port's fence until its ordered BRESP has arrived.
+        wn <= wn + WC'(w_address) - WC'(w_done);
+        a_wflight <= a_wflight + WC'(w_address && wport == W_A) - WC'(w_done && response_port == W_A);
+        b_wflight <= b_wflight + WC'(w_address && wport == W_B) - WC'(w_done && response_port == W_B);
+        if (w_address) begin wports[wt] <= wport; wt <= wt + 1'b1; end
+        if (w_done) wh <= wh + 1'b1;
+      end
+      if (w_done && (m_axi_bresp != 0 || m_axi_bid != 0)) error <= 1'b1;
+      if (w_retire) wnext <= (wport == W_B) ? W_SW : wport + 1'b1;
       b_flight <= b_flight + (ar_fire && ar_port_b ? BF'(ar_chunks_last) + BF'(1) : BF'(0)) - BF'(b_done);
       rn <= rn + (RP+1)'(ar_fire) - (RP+1)'(r_done);
       if (ar_fire) rt <= (READ_DEPTH == 1) ? '0 : rt + 1'b1;
@@ -311,9 +349,11 @@ module otpu_ps_dram #(
           end
         end else if (a_head_read && !a_flight && !a_hit) begin
           ar_valid <= 1'b1; ar_port_b <= 1'b0;
-          ar_addr <= BASE + {6'd0, aq[ah].addr[31:3], 5'd0};
-          ar_last <= 3'(32/AXI_BYTES-1); ar_tags <= '0; ar_chunks_last <= '0;
-          ar_burst_last <= 8'(32/AXI_BYTES-1);
+          // Align the wider fill to its whole region. It cannot
+          // cross a 4-KiB boundary, including when the requested half is odd.
+          ar_addr <= BASE + {6'd0, aq[ah].addr[31:AC_LG], {(AC_LG+2){1'b0}}};
+          ar_last <= 3'(32*A_CACHE_LINES/AXI_BYTES-1); ar_tags <= '0; ar_chunks_last <= '0;
+          ar_burst_last <= 8'(32*A_CACHE_LINES/AXI_BYTES-1);
         end
       end
       if (ar_fire) begin
@@ -321,12 +361,25 @@ module otpu_ps_dram #(
         prefer_b <= !ar_port_b;
         if (!ar_port_b) begin
           a_flight <= 1'b1;
-          a_line <= aq[ah].addr[31:3];
+          a_line <= aq[ah].addr[31:AC_LG];
+          a_select <= A_CACHE_LINES == 1 ? '0 : aq[ah].addr[3 +: AIW];
+          cache_valid <= 1'b0;
           a_cacheable <= !a_flush && wr_idle && !write_taken;
         end
       end
-      if (a_hit) begin a_rvalid <= 1'b1; a_rdata <= cache_data; end
+      if (a_hit) begin
+        a_rvalid <= 1'b1;
+        a_rdata <= cache_data[256*(A_CACHE_LINES == 1 ? 0 : int'(aq[ah].addr[3 +: AIW])) +: 256];
+      end
       if (r_fire) begin
+        // Capture A's selected line directly from the AXI beats. A wider
+        // cache fill does not widen B's chunk buffer or add an assembly mux
+        // to the scale response. Valid remains low until the fill completes.
+        if (!rq[rh].port_b) begin
+          cache_data[AXI_DATA_WIDTH*rbeat +: AXI_DATA_WIDTH] <= m_axi_rdata;
+          if (int'(rbeat)/(32/AXI_BYTES) == int'(a_select))
+            a_rdata[AXI_DATA_WIDTH*(int'(rbeat)%(32/AXI_BYTES)) +: AXI_DATA_WIDTH] <= m_axi_rdata;
+        end
         if (m_axi_rresp != 0 || m_axi_rid != 0 ||
             m_axi_rlast != (rbeat == rq[rh].last && rchunk == rq[rh].chunks_last))
           error <= 1'b1;
@@ -340,11 +393,9 @@ module otpu_ps_dram #(
           end else begin
             a_flight <= 1'b0;
             a_rvalid <= 1'b1;
-            a_rdata <= rcomplete[255:0];
             if (a_cacheable && wr_idle && !write_taken && !a_flush) begin
               cache_valid <= 1'b1;
               cache_line <= a_line;
-              cache_data <= rcomplete[255:0];
             end
           end
         end else rbeat <= rbeat + 1'b1;
@@ -354,7 +405,7 @@ module otpu_ps_dram #(
       if (a_flush || write_taken) begin cache_valid <= 1'b0; a_cacheable <= 1'b0; end
 
       case (ws)
-        W_IDLE: if (have_w) begin
+        W_IDLE: if (have_w && (!WPIPE || wn < WC'(WRITE_DEPTH))) begin
           wport <= pick_w;
           wbeat <= '0;
           wlast <= '0;
@@ -376,12 +427,10 @@ module otpu_ps_dram #(
         end
         W_ADDR: if (m_axi_awready) ws <= W_DATA;
         W_DATA: if (m_axi_wready) begin
-          if (wbeat == wlast) ws <= W_RESP;
+          if (wbeat == wlast) ws <= WPIPE ? W_IDLE : W_RESP;
           else wbeat <= wbeat + 1'b1;
         end
         W_RESP: if (m_axi_bvalid) begin
-          if (m_axi_bresp != 0 || m_axi_bid != 0) error <= 1'b1;
-          wnext <= (wport == W_B) ? W_SW : wport + 1'b1;
           ws <= W_IDLE;
         end
         default: ws <= W_IDLE;

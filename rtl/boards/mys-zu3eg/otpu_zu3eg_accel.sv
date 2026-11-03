@@ -8,6 +8,8 @@ module otpu_zu3eg_accel #(
   parameter int BRIDGE_READ_DEPTH = 8,
   parameter int BRIDGE_B_DEPTH = 8,
   parameter int BRIDGE_READ_CHUNKS = 1,
+  parameter int BRIDGE_A_CACHE_LINES = 1,
+  parameter int BRIDGE_WRITE_DEPTH = 1,
   parameter int MCOLS = 1,
   parameter int ACT_BLOCKS = 48,
   parameter int ACT_ROWS = 1,
@@ -221,7 +223,8 @@ module otpu_zu3eg_accel #(
     .halted, .error(core_error), .wait_to, .a_inval, .icount, .memory_stall
   );
   otpu_ps_dram #(.D(D), .AXI_DATA_WIDTH(AXI_DATA_WIDTH), .READ_DEPTH(BRIDGE_READ_DEPTH),
-    .B_DEPTH(BRIDGE_B_DEPTH), .READ_CHUNKS(BRIDGE_READ_CHUNKS)) u_ddr (
+    .B_DEPTH(BRIDGE_B_DEPTH), .READ_CHUNKS(BRIDGE_READ_CHUNKS),
+    .A_CACHE_LINES(BRIDGE_A_CACHE_LINES), .WRITE_DEPTH(BRIDGE_WRITE_DEPTH)) u_ddr (
     .clk, .rst(!aresetn), .a_flush(a_inval || !run),
     .a_req, .a_we, .a_addr, .a_wdata, .a_be, .a_rdy, .a_rvalid, .a_rdata,
     .sw_req, .sw_addr, .sw_wdata, .sw_be, .sw_rdy,

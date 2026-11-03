@@ -7,6 +7,8 @@ module otpu_zu3eg_wrapper #(
   parameter integer BRIDGE_READ_DEPTH = 8,
   parameter integer BRIDGE_B_DEPTH = 8,
   parameter integer BRIDGE_READ_CHUNKS = 1,
+  parameter integer BRIDGE_A_CACHE_LINES = 1,
+  parameter integer BRIDGE_WRITE_DEPTH = 1,
   parameter integer MCOLS = 1,
   parameter integer ACT_BLOCKS = 48,
   parameter integer ACT_ROWS = 1,
@@ -39,7 +41,9 @@ module otpu_zu3eg_wrapper #(
   (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 aresetn RST",
      X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)
   input wire aresetn,
-  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI AWADDR" *)
+  // Upper bounds cover all bridge configurations exposed by build_board.
+  (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI AWADDR",
+     X_INTERFACE_PARAMETER = "XIL_INTERFACENAME M_AXI, NUM_READ_OUTSTANDING 32, NUM_WRITE_OUTSTANDING 8, MAX_BURST_LENGTH 256" *)
   output wire [39:0] m_axi_awaddr,
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI AWLEN" *)
   output wire [7:0] m_axi_awlen,
@@ -152,7 +156,8 @@ module otpu_zu3eg_wrapper #(
     .AXI_DATA_WIDTH(AXI_DATA_WIDTH), .MEMORY_STATS(MEMORY_STATS),
     .SEQ_FP_PIPE(SEQ_FP_PIPE),
     .BRIDGE_READ_DEPTH(BRIDGE_READ_DEPTH), .BRIDGE_B_DEPTH(BRIDGE_B_DEPTH),
-    .BRIDGE_READ_CHUNKS(BRIDGE_READ_CHUNKS),
+    .BRIDGE_READ_CHUNKS(BRIDGE_READ_CHUNKS), .BRIDGE_A_CACHE_LINES(BRIDGE_A_CACHE_LINES),
+    .BRIDGE_WRITE_DEPTH(BRIDGE_WRITE_DEPTH),
     .D(D),
     .MCOLS(MCOLS),
     .ACT_BLOCKS(ACT_BLOCKS),

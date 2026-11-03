@@ -3,6 +3,7 @@
 // latency, random channel stalls, and an independent writer with delayed BRESP.
 module otpu_ps_axi_mem #(
   parameter int WORDS = 2048, READ_DEPTH = 16, READ_LATENCY = 24, DATA_WIDTH = 128, R_STALL = 1,
+  parameter int WRITE_DEPTH = 1,
   parameter logic [39:0] BASE = 0
 ) (
   input logic clk, rst, wr_idle,
@@ -34,10 +35,13 @@ module otpu_ps_axi_mem #(
   int rh = 0, rt = 0, rn = 0, rbeat = 0;
   int write_at = 0, writes_left = 0, b_delay = 0;
   bit writing = 0;
+  int write_due [WRITE_DEPTH];
+  int wh = 0, wt = 0, wn = 0, max_write_pending = 0;
   wire ar_fire = m_axi_arvalid && m_axi_arready;
   wire r_fire = m_axi_rvalid && m_axi_rready;
   wire r_done = r_fire && m_axi_rlast;
-  assign m_axi_awready = !rst && !writing && !m_axi_bvalid && b_delay == 0 && random_state[0];
+  assign m_axi_awready = !rst && !writing && random_state[0] &&
+                        (WRITE_DEPTH > 1 ? wn < WRITE_DEPTH : (!m_axi_bvalid && b_delay == 0));
   assign m_axi_wready = !rst && writing && random_state[2];
   assign m_axi_arready = !rst && rn < READ_DEPTH && random_state[3];
 
@@ -69,6 +73,7 @@ module otpu_ps_axi_mem #(
       m_axi_bresp <= 0; m_axi_rresp <= 0;
       m_axi_bid <= 0; m_axi_rid <= 0; m_axi_rlast <= 0; m_axi_rdata <= '0;
       max_read_pending <= 0;
+      wh <= 0; wt <= 0; wn <= 0; max_write_pending <= 0;
     end else begin
       rn <= rn + int'(ar_fire) - int'(r_done);
       if (rn > max_read_pending) max_read_pending <= rn;
@@ -116,18 +121,39 @@ module otpu_ps_axi_mem #(
         if (m_axi_wlast != (writes_left == 1)) $fatal(1, "bad WLAST");
         write_at <= write_at + BEAT_WORDS;
         writes_left <= writes_left - 1;
-        if (writes_left == 1) begin writing <= 0; b_delay <= 11; end
+          if (writes_left == 1) begin
+            writing <= 0;
+            if (WRITE_DEPTH == 1) b_delay <= 11;
+          end
       end
-      if (b_delay > 0) begin
-        if (wr_idle) $fatal(1, "write idle before B response");
-        if (b_delay > 1) b_delay <= b_delay - 1;
-        else if (!hold_b) begin
-          b_delay <= 0;
+      if (WRITE_DEPTH > 1) begin
+        wn <= wn + int'(m_axi_wvalid && m_axi_wready && m_axi_wlast) -
+                   int'(m_axi_bvalid && m_axi_bready);
+        if (m_axi_wvalid && m_axi_wready && m_axi_wlast) begin
+          write_due[wt] <= cycles+11;
+          wt <= (wt+1)%WRITE_DEPTH;
+        end
+        if (wn > max_write_pending) max_write_pending <= wn;
+        if (wn != 0 && wr_idle) $fatal(1, "write idle before queued B responses");
+        if (m_axi_bvalid && m_axi_bready) begin
+          wh <= (wh+1)%WRITE_DEPTH;
+          m_axi_bvalid <= 0;
+        end else if (!m_axi_bvalid && wn != 0 && cycles >= write_due[wh] && !hold_b) begin
           m_axi_bvalid <= 1;
           m_axi_bresp <= inject_b_error ? 2 : 0;
         end
+      end else begin
+        if (b_delay > 0) begin
+          if (wr_idle) $fatal(1, "write idle before B response");
+          if (b_delay > 1) b_delay <= b_delay - 1;
+          else if (!hold_b) begin
+            b_delay <= 0;
+            m_axi_bvalid <= 1;
+            m_axi_bresp <= inject_b_error ? 2 : 0;
+          end
+        end
+        if (m_axi_bvalid && m_axi_bready) m_axi_bvalid <= 0;
       end
-      if (m_axi_bvalid && m_axi_bready) m_axi_bvalid <= 0;
     end
   end
 endmodule

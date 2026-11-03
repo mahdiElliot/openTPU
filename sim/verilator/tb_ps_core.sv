@@ -2,7 +2,8 @@
 module tb_ps_core #(
   parameter int D = 128, MCOLS = 1, ACT_BLOCKS = 48, ACT_ROWS = 1, MXU_E = 1,
                 AXI_DATA_WIDTH = 256, READ_DEPTH = 8, READ_CHUNKS = 1, WORDS = 1 << 18,
-                TMEM_NSB = 2, TMEM_SBH = 0, VPU_CL = 1, WIN = 8, SEQ_FP_PIPE = 0
+                TMEM_NSB = 2, TMEM_SBH = 0, VPU_CL = 1, WIN = 8, SEQ_FP_PIPE = 0,
+                FIFO_DEPTH = 64, READ_LATENCY = 24, A_CACHE_LINES = 1, WRITE_DEPTH = 1
 );
   logic clk = 0, aresetn = 0, dump = 0;
   always #5 clk = !clk;
@@ -65,6 +66,9 @@ module tb_ps_core #(
                       .MEMORY_STATS(1), .BRIDGE_READ_DEPTH(READ_DEPTH),
                       .TMEM_NSB(TMEM_NSB), .TMEM_SBH(TMEM_SBH),
                       .VPU_CL(VPU_CL), .WIN(WIN),
+                      .FIFO_DEPTH(FIFO_DEPTH),
+                      .BRIDGE_A_CACHE_LINES(A_CACHE_LINES),
+                      .BRIDGE_WRITE_DEPTH(WRITE_DEPTH),
                       .SEQ_FP_PIPE(SEQ_FP_PIPE),
                       .BRIDGE_B_DEPTH(READ_DEPTH > 8 ? READ_DEPTH : 8),
                       .BRIDGE_READ_CHUNKS(READ_CHUNKS)) dut (.*);
@@ -100,7 +104,9 @@ module tb_ps_core #(
     previous_starve = dut.u_core.u_slice.mxu_starve;
   end
   wire wr_idle = dut.wr_idle;
-  otpu_ps_axi_mem #(.WORDS(WORDS), .DATA_WIDTH(AXI_DATA_WIDTH), .BASE(40'h10000000)) memory_model (
+  otpu_ps_axi_mem #(.WORDS(WORDS), .READ_DEPTH(READ_DEPTH), .READ_LATENCY(READ_LATENCY),
+                   .WRITE_DEPTH(WRITE_DEPTH),
+                   .DATA_WIDTH(AXI_DATA_WIDTH), .BASE(40'h10000000)) memory_model (
     .clk, .rst(!aresetn), .wr_idle,
     .hold_reads(1'b0), .hold_b(1'b0), .inject_b_error(1'b0), .inject_r_error(1'b0),
     .read_bursts(), .max_read_pending(), .cycles(), .*

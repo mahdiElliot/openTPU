@@ -30,7 +30,11 @@ def main():
     parser.add_argument('--strategy', default='default', choices=(
         'default', 'Performance_Explore', 'Congestion_SpreadLogic_high',
         'Performance_ExplorePostRoutePhysOpt'), help='Vivado implementation strategy')
-    parser.add_argument('--read-depth', type=int, choices=(8, 16), default=8)
+    parser.add_argument('--read-depth', type=int, choices=(8, 16, 32), default=8)
+    parser.add_argument('--scale-cache-lines', type=int, choices=(1, 2, 4, 8), default=1,
+                        help='adjacent 32-byte scale lines per cache fill')
+    parser.add_argument('--write-depth', type=int, choices=(1, 2, 4, 8), default=1,
+                        help='ordered AXI write-response credits; same-port reads remain fenced')
     parser.add_argument('--read-chunks', type=int, choices=(1, 2, 4, 8), default=1,
                         help='maximum contiguous D-byte reads combined into one burst')
     options = parser.parse_args()
@@ -49,6 +53,8 @@ def main():
         parser.error('this shell uses the systolic MXU_IMPL=2')
     if target.uarch['TMEM_IMPL'] != 3 or target.uarch.get('TMEM_PMP', 0) != 0:
         parser.error('this shell requires single-copy TMEM_IMPL=3 with TMEM_PMP=0')
+    if 32 * options.scale_cache_lines // (options.axi_data_width//8) > 8:
+        parser.error('eight scale-cache lines require the 256-bit AXI interface')
     files = T.CORE + T.TECH['xilinxus'] + ['asic/otpu_asic_top.sv', 'shell/otpu_ctrl.sv',
             'boards/mys-zu3eg/otpu_ps_dram.sv', 'boards/mys-zu3eg/otpu_zu3eg_accel.sv',
             'boards/mys-zu3eg/otpu_zu3eg_wrapper.v']
@@ -61,6 +67,8 @@ def main():
     parameters.update(AXI_DATA_WIDTH=options.axi_data_width, CORE_KHZ=round(options.core_mhz * 1000), ARCH_HASH=T.arch_hash(cfg))
     parameters['MEMORY_STATS'] = int(options.memory_stats)
     parameters['SEQ_FP_PIPE'] = int(options.scheduler_pipeline)
+    parameters['BRIDGE_A_CACHE_LINES'] = options.scale_cache_lines
+    parameters['BRIDGE_WRITE_DEPTH'] = options.write_depth
     parameters.update(BRIDGE_READ_DEPTH=options.read_depth, BRIDGE_B_DEPTH=options.read_depth,
                       BRIDGE_READ_CHUNKS=options.read_chunks)
     (out / 'build_params.tcl').write_text(
@@ -75,10 +83,12 @@ def main():
         'scheduler_footprint_pipeline': options.scheduler_pipeline,
         'separate_mmcm': options.separate_mmcm,
         'implementation_strategy': options.strategy,
-        'ps_pl0_input_mhz': 100, 'control_base': '0x80000000',
+        'ps_pl0_input_mhz': 100, 'input_jitter_ns': 0.100, 'control_base': '0x80000000',
         'ddr_base': '0x10000000', 'ps_boot': 'preserve existing initialized PS DDR; PL-only programming',
-        'memory_bridge': f'queued {options.axi_data_width}-bit bridge, 128-bit HP0, up to {options.read_depth} reads outstanding, up to {options.read_chunks} chunks per read burst, independent writes, 32-byte scale-line cache',
+        'memory_bridge': f'queued {options.axi_data_width}-bit bridge, 128-bit HP0, up to {options.read_depth} reads outstanding, up to {options.read_chunks} chunks per read burst, independent writes, {32*options.scale_cache_lines}-byte scale cache',
         'read_depth': options.read_depth, 'read_chunks': options.read_chunks,
+        'scale_cache_lines': options.scale_cache_lines,
+        'write_depth': options.write_depth,
         'bridge_axi_bits': options.axi_data_width, 'hp_axi_bits': 128,
         'width_conversion_clock': 'HP AXI' if options.axi_data_width != 128 else 'none'}
     if options.loader:

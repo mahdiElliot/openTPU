@@ -35,15 +35,16 @@ def file_digest(path):
     return h.hexdigest()
 
 
-def model_layout(model, target, capacity, rows=1):
+def model_layout(model, target, capacity, rows=1, lookup=False):
     return {'target': target, 'config': asdict(T.config(target)), 'capacity': capacity,
-            'rows': rows, 'wformat': 'int4', 'head_format': 'int8', 'lookup': False,
+            'rows': rows, 'wformat': 'int4', 'head_format': 'int8', 'lookup': lookup,
             'checkpoint': imgcache.checkpoint(model), 'source': progcache.source()}
 
 
-def engine(model, out, backend, target=DEFAULT_TARGET, capacity=CAPACITY, pipeline=False, rows=1):
+def engine(model, out, backend, target=DEFAULT_TARGET, capacity=CAPACITY, pipeline=False, rows=1,
+           device_decode=False):
     cfg, spec = T.config(target), load_spec(model)
-    layout = digest(model_layout(model, target, capacity, rows))
+    layout = digest(model_layout(model, target, capacity, rows, device_decode))
 
     def build(image, weights, unused_layout):
         path, manifest = out / 'model_image.bin', out / 'model_image.json'
@@ -67,7 +68,7 @@ def engine(model, out, backend, target=DEFAULT_TARGET, capacity=CAPACITY, pipeli
 
     with patch.object(imgcache, 'build', build):
         return Engine(spec, load_weights(model), cfg=cfg, cap=capacity, rows=rows,
-                      backend=backend, pipeline=pipeline, resident=False,
+                      backend=backend, pipeline=pipeline, resident=device_decode,
                       wformat='int4', head_format='int8', prog_cache=False, snapshots=0)
 
 
@@ -98,9 +99,11 @@ def kernel_check(link, out, target, hardware_id, fmt='int8'):
     print('BOARD_KERNEL_BIT_EXACT', fmt, stats, flush=True)
 
 
-def preflight(model, target, capacity, prompt_count, decode_count, out, rows=1):
+def preflight(model, target, capacity, prompt_count, decode_count, out, rows=1, lookup=False,
+              image_rows=None):
     cfg = T.config(target)
-    image = load_spec(model).image(cfg, capacity, rows=rows, wformat='int4', head_format='int8', lookup=False)
+    image = load_spec(model).image(cfg, capacity, rows=image_rows or rows,
+                                  wformat='int4', head_format='int8', lookup=lookup)
     checks = []
     positions = sorted({0, min(3, prompt_count - 1), prompt_count - 1,
                         prompt_count, prompt_count + decode_count - 1})
@@ -189,15 +192,16 @@ def forward_prefill(eng, ids, progress, compile_ahead=False, rows=1):
 
 
 def reference_run(options, ids, request_id, tokenizer):
-    eng = engine(options.model, options.out, 'isa', options.target, options.capacity, rows=options.prefill_rows)
+    eng = engine(options.model, options.out, 'isa', options.target, options.capacity,
+                 rows=options.image_rows, device_decode=options.device_decode)
     begin = time.monotonic()
     try:
-        def progress(position, elapsed):
+        def progress(position, elapsed, count=1):
             if position % 8 == 7 or position == len(ids) - 1:
                 save(options.out / 'reference_progress.json', {'prefill_tokens': position + 1,
                                                               'seconds': time.monotonic() - begin})
                 print(f'ISA reference prefill {position+1}/{len(ids)}', flush=True)
-        logits = forward_prefill(eng, ids, progress)
+        logits = forward_prefill(eng, ids, progress, rows=options.prefill_rows)
         logits.astype('<f4').tofile(options.out / 'reference_prefill_logits.bin')
         seed = token = int(np.argmax(logits))
         generated = []
@@ -249,6 +253,37 @@ def memory_statistics(link, cycles):
             'either_condition_cycles': union, 'overlap_cycles': pressure + starve - union}
 
 
+def device_decode(eng, seed, count):
+    """Run greedy decoding in one hardware loop, preserving final-logit validation.
+
+    Uses existing RLD/LOOP/ARGMAX instructions. Empty stop IDs deliberately keep
+    the fixed-length benchmark semantics, including when the model produces EOS.
+    """
+    from opentpu.llm import generate as G
+    position = eng.pos
+    block = eng.block
+    if position < getattr(eng.spec, 'conv_k', 1)-1 or position+count > min(
+            eng.cap, (position//block+1)*block):
+        raise ValueError('Device decode must fit one attention bucket after convolution warmup')
+    programs = eng.image.compile_generate(position//block+1, position, block,
+                                          chain=False, debug=True)
+    if any(len(p)*8 > eng.cfg.IMEM_WORDS for p in programs):
+        raise ValueError('Device decode program exceeds instruction memory')
+    g = eng.image.lookup['gen']
+    eng.backend.write(0, g['state'], G.state_words(eng.spec, seed, position, count, [], block))
+    eng.backend.write(0, g['out']+4*(position+1), np.full(count, G.OUT_MARK, dtype='<u4'))
+    stats = eng.backend.run(programs)
+    values = eng.backend.read(0, g['out']+4*(position+1), 4*count).view('<f4')
+    if (not np.isfinite(values).all() or np.any(values != np.floor(values)) or
+        np.any(values < 0) or np.any(values >= eng.spec.vocab)):
+        raise RuntimeError('Device decode did not return the requested valid token IDs')
+    logits = eng.backend.read(0, eng.image.io['logits'], eng.image.v_loc*4).view('<f4')
+    if not np.isfinite(logits).all():
+        raise RuntimeError('Nonfinite device-decode logits')
+    eng.pos += count
+    return logits, values.astype(np.int64).tolist(), stats
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, default=DEPLOY / 'run')
@@ -256,8 +291,10 @@ def main():
     parser.add_argument('--target', default=DEFAULT_TARGET)
     parser.add_argument('--hardware', type=Path, default=DEPLOY / 'hardware')
     parser.add_argument('--prefill', type=int, default=PREFILL)
-    parser.add_argument('--prefill-rows', type=int, choices=(1, 2, 4), default=1,
+    parser.add_argument('--prefill-rows', type=int, choices=(1, 2, 4, 6), default=1,
                         help='consecutive prompt tokens per run; reuses weights across activation rows')
+    parser.add_argument('--image-rows', type=int, choices=(1, 2, 4, 6),
+                        help='allocate this many image rows (default: --prefill-rows); allows grouping comparisons on one image')
     parser.add_argument('--decode', type=int, default=DECODE, help='additional forward/argmax steps after the prefill seed')
     parser.add_argument('--capacity', type=int, default=CAPACITY)
     parser.add_argument('--prompt-file', type=Path, default=ROOT / 'tools/data/austen_pp_ch1.txt')
@@ -270,6 +307,8 @@ def main():
                         help='compile the next prefill/decode program while the FPGA executes')
     parser.add_argument('--compute-overlap', action='store_true',
                         help='double-buffer Qwen3.5 prompt projections to overlap MXU and VPU work')
+    parser.add_argument('--device-decode', action='store_true',
+                        help='use on-device inputs and one greedy decode loop; requires a new prepared image')
     parser.add_argument('--profile', action='store_true',
                         help='record per-step host, transfer, control and FPGA timings')
     parser.add_argument('--memory-stats', action='store_true',
@@ -282,6 +321,7 @@ def main():
     parser.add_argument('--preloaded', action='store_true')
     parser.add_argument('--verify-isa', action='store_true')
     options = parser.parse_args()
+    options.image_rows = options.image_rows or options.prefill_rows
     if options.compute_overlap:
         os.environ['OTPU_Q35_ROWS_OVERLAP'] = '1'
     if options.run_control == 'ethernet' and options.data_transport != 'ethernet':
@@ -295,16 +335,18 @@ def main():
     os.environ.pop('OTPU_FORMATS', None)
     os.environ.setdefault('OTPU_BUILD_JOBS', '1')
     cfg = T.config(options.target)
-    if options.prefill_rows > cfg.act_rows:
-        parser.error('--prefill-rows exceeds the target activation-row storage')
+    if not options.prefill_rows <= options.image_rows <= cfg.act_rows:
+        parser.error('require --prefill-rows <= --image-rows <= target activation-row storage')
     if options.preflight:
-        preflight(options.model, options.target, options.capacity, options.prefill, options.decode, options.out, options.prefill_rows)
+        preflight(options.model, options.target, options.capacity, options.prefill, options.decode, options.out,
+                  options.prefill_rows, options.device_decode, options.image_rows)
         return
     if options.prepare:
         class Prepared:
             def __init__(self, cfg, images):
                 self.images = images
-        eng = engine(options.model, options.out, Prepared, options.target, options.capacity, rows=options.prefill_rows)
+        eng = engine(options.model, options.out, Prepared, options.target, options.capacity,
+                     rows=options.image_rows, device_decode=options.device_decode)
         print('MODEL_IMAGE_PREPARED', eng.image.nbytes, flush=True)
         eng._drain()
         return
@@ -313,8 +355,14 @@ def main():
     ids = tokenizer(options.prompt_file.read_text(), add_special_tokens=False).input_ids[:options.prefill]
     if len(ids) != options.prefill:
         raise ValueError('Prompt file contains fewer tokens than --prefill')
-    request_id = digest({'layout': model_layout(options.model, options.target, options.capacity, options.prefill_rows),
-                         'prompt_ids': ids, 'decode_steps': options.decode})
+    identity = {'layout': model_layout(options.model, options.target, options.capacity,
+                                     options.image_rows, options.device_decode),
+                'prompt_ids': ids, 'decode_steps': options.decode}
+    # PAIR and replay use different floating-point sum orders. A reference must
+    # name its grouping rather than silently compare a replay run to paired steps.
+    if cfg.PAIR:
+        identity['prefill_rows'] = options.prefill_rows
+    request_id = digest(identity)
     if options.reference_only:
         reference_run(options, ids, request_id, tokenizer)
         return
@@ -373,8 +421,10 @@ def main():
                    'data_transport': options.data_transport,
                    'run_control': options.run_control, 'compile_ahead': options.compile_ahead,
                    'compute_overlap': os.environ.get('OTPU_Q35_ROWS_OVERLAP', '0') == '1',
+                   'device_decode': options.device_decode,
                    'memory_stats_version': 1 if options.memory_stats else None,
                    'prefill_rows': options.prefill_rows,
+                   'image_rows': options.image_rows,
                    'prefill_method': f'up to {options.prefill_rows} rows per run; LM head on final row only',
                    'decode_method': 'README perf.py: seed from prefill, then N forward/argmax steps'}
         save(options.out / 'request.json', request)
@@ -386,7 +436,7 @@ def main():
         eng = engine(options.model, options.out,
                      lambda c, images: backend(c, images, link, verify=False, upload=not options.preloaded),
                      options.target, options.capacity, pipeline='thread' if options.compile_ahead else False,
-                     rows=options.prefill_rows)
+                     rows=options.image_rows, device_decode=options.device_decode)
         request.update(setup_wall_seconds=time.monotonic() - setup, image_bytes=eng.image.nbytes)
         if options.preloaded:
             loaded['pristine'] = False
@@ -410,22 +460,34 @@ def main():
         logits.astype('<f4').tofile(options.out / 'prefill_logits.bin')
         seed = token = int(np.argmax(logits))
         decode_begin = time.monotonic()
-        for index in range(options.decode):
-            step_begin = time.monotonic()
-            logits = eng.step(token)
-            if not np.isfinite(logits).all():
-                raise RuntimeError('Nonfinite decode logits')
-            token = int(np.argmax(logits))
-            generated.append(token)
-            row = {'phase': 'decode', 'position': len(ids) + index,
-                   'cycles': eng.stats[-1]['cycles'], 'wall_seconds': time.monotonic() - step_begin, 'token': token}
+        if options.device_decode:
+            logits, generated, stats = device_decode(eng, seed, options.decode)
+            row = {'phase': 'decode', 'position': len(ids), 'tokens': options.decode,
+                   'cycles': stats['cycles'], 'wall_seconds': time.monotonic()-decode_begin}
             if options.profile:
                 row['profile'] = link.take(row['wall_seconds'], row['cycles'], khz * 1000)
             if options.memory_stats:
                 row['memory_stats'] = memory_statistics(link, row['cycles'])
             steps.append(row)
-            save(options.out / 'progress.json', request | {'complete': False, 'steps': steps, 'generated_tokens': generated})
-            print(f'BOARD decode {index+1}/{options.decode}: {eng.stats[-1]["cycles"]} cycles, {tokenizer.decode([seed]+generated)!r}', flush=True)
+            print(f'BOARD device decode {options.decode}: {stats["cycles"]} cycles, '
+                  f'{tokenizer.decode([seed]+generated)!r}', flush=True)
+        else:
+            for index in range(options.decode):
+                step_begin = time.monotonic()
+                logits = eng.step(token)
+                if not np.isfinite(logits).all():
+                    raise RuntimeError('Nonfinite decode logits')
+                token = int(np.argmax(logits))
+                generated.append(token)
+                row = {'phase': 'decode', 'position': len(ids) + index,
+                       'cycles': eng.stats[-1]['cycles'], 'wall_seconds': time.monotonic() - step_begin, 'token': token}
+                if options.profile:
+                    row['profile'] = link.take(row['wall_seconds'], row['cycles'], khz * 1000)
+                if options.memory_stats:
+                    row['memory_stats'] = memory_statistics(link, row['cycles'])
+                steps.append(row)
+                save(options.out / 'progress.json', request | {'complete': False, 'steps': steps, 'generated_tokens': generated})
+                print(f'BOARD decode {index+1}/{options.decode}: {eng.stats[-1]["cycles"]} cycles, {tokenizer.decode([seed]+generated)!r}', flush=True)
         decode_wall, request_wall = time.monotonic() - decode_begin, time.monotonic() - begin
         logits.astype('<f4').tofile(options.out / 'final_logits.bin')
         pc = sum(s['cycles'] for s in steps if s['phase'] == 'prefill')

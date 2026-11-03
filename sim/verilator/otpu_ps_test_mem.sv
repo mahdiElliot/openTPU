@@ -3,6 +3,7 @@
 // converter and fast-domain downsizer, with independent core and memory clocks.
 module otpu_ps_test_mem #(
   parameter int WORDS = 2048, READ_DEPTH = 16, READ_LATENCY = 24, DATA_WIDTH = 256, VENDOR_PATH = 0,
+  parameter int WRITE_DEPTH = 1,
   parameter logic [39:0] BASE = 0
 ) (
   input logic clk, mem_clk, rst, wr_idle,
@@ -351,7 +352,7 @@ module otpu_ps_test_mem #(
     assign m_axi_rvalid = hp_rvalid;
     assign hp_rready = m_axi_rready;
   end
-  otpu_ps_axi_mem #(.WORDS(WORDS), .READ_DEPTH(READ_DEPTH),
+  otpu_ps_axi_mem #(.WORDS(WORDS), .READ_DEPTH(READ_DEPTH), .WRITE_DEPTH(WRITE_DEPTH),
                      .READ_LATENCY(READ_LATENCY), .DATA_WIDTH(HP_WIDTH), .R_STALL(!VENDOR_PATH), .BASE(BASE)) slave (
     .clk(VENDOR_PATH ? mem_clk : clk), .rst(VENDOR_PATH ? !hp_reset[2] : rst), .wr_idle,
     .hold_reads, .hold_b, .inject_b_error, .inject_r_error,

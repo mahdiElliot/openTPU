@@ -12,15 +12,17 @@ def test_ps_bridge_protocol(depth, width):
     _run_bridge(depth, width=width)
 
 
-def _run_bridge(depth, read_depth=8, width=256, read_chunks=1):
+def _run_bridge(depth, read_depth=8, width=256, read_chunks=1, cache_lines=1, write_depth=1,
+                bridge_source=None):
     flags = list(rtlsim.VFLAGS)
     try:
         rtlsim.VFLAGS[rtlsim.VFLAGS.index('-j') + 1] = '2'
         exe = rtlsim.build('tb_ps_dram', [
-            rtlsim.RTL / 'boards/mys-zu3eg/otpu_ps_dram.sv',
+            bridge_source or rtlsim.RTL / 'boards/mys-zu3eg/otpu_ps_dram.sv',
             rtlsim.TB / 'otpu_ps_axi_mem.sv', rtlsim.TB / 'otpu_ps_test_mem.sv',
             rtlsim.TB / 'tb_ps_dram.sv'], {'D': depth, 'READ_DEPTH': read_depth,
-                                       'READ_CHUNKS': read_chunks, 'AXI_DATA_WIDTH': width})
+                                       'READ_CHUNKS': read_chunks, 'AXI_DATA_WIDTH': width,
+                                       'A_CACHE_LINES': cache_lines, 'WRITE_DEPTH': write_depth})
         result = rtlsim.run_sim([str(exe)], timeout=30)
         assert result.returncode == 0, result.stdout + result.stderr
         assert 'PS_DRAM_PROTOCOL_PASS' in result.stdout
@@ -55,6 +57,25 @@ def test_ps_bridge_combines_reads_and_keeps_sixteen_bursts_pending(depth, width)
     assert result['max_reads'] == 16
     assert result['bursts'] < result['chunks']
     print('Combined reads:', depth, width, result)
+
+
+@pytest.mark.parametrize('depth,width,reads', [(64, 256, 16), (64, 256, 32),
+                                               (128, 128, 16)])
+@pytest.mark.parametrize('lines', [2, 4])
+def test_ps_bridge_scale_cache_and_long_bursts(depth, width, reads, lines):
+    result = _run_bridge(depth, read_depth=reads, width=width, read_chunks=8, cache_lines=lines)
+    assert result['max_reads'] == reads
+    assert result['bursts'] < result['chunks']
+
+
+@pytest.mark.parametrize('depth,writes', [(32, 4), (64, 4), (128, 8)])
+def test_ps_bridge_eight_line_scale_cache(depth, writes):
+    _run_bridge(depth, read_depth=16, width=256, read_chunks=8, cache_lines=8, write_depth=writes)
+
+
+@pytest.mark.parametrize('width,writes', [(128, 2), (256, 4), (256, 8)])
+def test_ps_bridge_pipelines_writes_and_keeps_read_after_write_fences(width, writes):
+    _run_bridge(64, read_depth=16, width=width, read_chunks=8, cache_lines=2, write_depth=writes)
 
 
 @pytest.mark.parametrize("target,fmt", [("mys-zu3eg:d128-m1", "int8"),

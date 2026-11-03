@@ -2,7 +2,7 @@
 // PS bridge protocol regression: independent AW/W/R stalls, delayed B responses,
 // masked chunk stores, byte stores, tagged reads, and host cache invalidation.
 module tb_ps_dram #(parameter int D = 128, READ_DEPTH = 8, READ_CHUNKS = 1,
-                    AXI_DATA_WIDTH = 256, VENDOR_PATH = 0);
+                    AXI_DATA_WIDTH = 256, VENDOR_PATH = 0, A_CACHE_LINES = 1, WRITE_DEPTH = 1);
   localparam int CW = D/4;
   localparam int STREAM_N = (READ_DEPTH*READ_CHUNKS+8 > 24) ? READ_DEPTH*READ_CHUNKS+8 : 24;
   logic clk = 0, mem_clk = 0;
@@ -33,11 +33,13 @@ module tb_ps_dram #(parameter int D = 128, READ_DEPTH = 8, READ_CHUNKS = 1,
   logic m_axi_bvalid, m_axi_rvalid, m_axi_rlast;
   logic m_axi_bready, m_axi_rready;
   otpu_ps_dram #(.BASE(0), .D(D), .READ_DEPTH(READ_DEPTH), .READ_CHUNKS(READ_CHUNKS),
-    .B_DEPTH(READ_DEPTH > 8 ? READ_DEPTH : 8), .AXI_DATA_WIDTH(AXI_DATA_WIDTH)) dut (.*);
+    .B_DEPTH(READ_DEPTH > 8 ? READ_DEPTH : 8), .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
+    .A_CACHE_LINES(A_CACHE_LINES), .WRITE_DEPTH(WRITE_DEPTH)) dut (.*);
 
   logic hold_reads = 0, hold_b = 0, inject_b_error = 0, inject_r_error = 0;
   int read_bursts, max_read_pending, cycles;
-  otpu_ps_test_mem #(.DATA_WIDTH(AXI_DATA_WIDTH), .VENDOR_PATH(VENDOR_PATH)) memory_model (.*);
+  otpu_ps_test_mem #(.DATA_WIDTH(AXI_DATA_WIDTH), .READ_DEPTH(READ_DEPTH),
+    .WRITE_DEPTH(WRITE_DEPTH), .VENDOR_PATH(VENDOR_PATH)) memory_model (.*);
   logic [31:0] expected [2048];
   logic [D*8-1:0] want_b [512];
   logic [255:0] want_a [512];
@@ -127,6 +129,36 @@ module tb_ps_dram #(parameter int D = 128, READ_DEPTH = 8, READ_CHUNKS = 1,
     write_b(1024-CW, CW'(32'h81818181)); read_b(1024-CW, 1);
     scalar_write(1023, 32'h76543210, 4'b1010);
     read_a(1023);
+
+    // Both halves of an aligned scale fill must return their own words, and
+    // stores into either half invalidate the complete cached region.
+    read_a(1440);
+    old_reads = read_bursts;
+    read_a(1448);
+    if (read_bursts != old_reads + (A_CACHE_LINES == 1 ? 1 : 0))
+      $fatal(1, "adjacent scale-line fill not reused");
+    scalar_write(1449, 32'h8badf00d, 15);
+    read_a(1448); read_a(1440);
+    if (WRITE_DEPTH > 1) begin
+      hold_b = 1;
+      for (int i = 0; i < WRITE_DEPTH; i++) send_sw(1504+i, 32'h24680000+i, 15);
+      wait (memory_model.slave.wn == WRITE_DEPTH);
+      if (wr_idle) $fatal(1, "pipelined writes lost their outstanding responses");
+      // Independent reads must continue while all BRESP credits are occupied.
+      read_b(128, 0);
+      hold_b = 0;
+      drain();
+      // A same-port read must wait for the older write's BRESP.
+      hold_b = 1;
+      send_write_b(1536, '1);
+      wait (dut.b_wflight != 0);
+      old_reads = read_bursts;
+      send_b(1536, 1);
+      repeat (20) @(negedge clk);
+      if (read_bursts != old_reads) $fatal(1, "B read passed its port's pending write");
+      hold_b = 0;
+      drain();
+    end
 
     // Queue more than a ring's worth of tagged reads. Hold responses initially:
     // an implementation which waits for each RLAST cannot fill the read credits.

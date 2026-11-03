@@ -19,6 +19,13 @@ def memory_path(directory, configuration):
     design = json.loads(bd.read_text())['design']
     components = design['components']
     errors = result['errors']
+    if 'write_depth' in configuration:
+        interface = components.get('accelerator', {}).get('interface_ports', {}).get('M_AXI', {})
+        credits = interface.get('parameters', {})
+        for key, wanted in [('NUM_READ_OUTSTANDING', configuration['read_depth']),
+                            ('NUM_WRITE_OUTSTANDING', configuration['write_depth'])]:
+            if int(credits.get(key, {}).get('value', '0')) < wanted:
+                errors.append(f'AXI metadata {key} understates the bridge credits')
 
     def parameter(component, name):
         return components.get(component, {}).get('parameters', {}).get(name, {}).get('value')
@@ -52,6 +59,18 @@ def memory_path(directory, configuration):
     return result
 
 
+def input_jitter_check(directory, configuration):
+    required = configuration.get('input_jitter_ns')
+    report = directory / 'clock_root.rpt'
+    if not report.exists():
+        report = directory / 'clock_root_100ps.rpt'
+    match = (re.search(r'^INPUT_JITTER\s+\S+\s+\S+\s+([\d.]+)', report.read_text(), re.M)
+             if report.exists() else None)
+    actual = float(match[1]) if match else None
+    return {'checked': required is not None, 'required_ns': required, 'reported_ns': actual,
+            'passed': required is None or (actual is not None and actual >= required)}
+
+
 def inspect(directory):
     configuration = json.loads((directory / 'configuration.json').read_text())
     text = (directory / 'timing.rpt').read_text()
@@ -71,15 +90,23 @@ def inspect(directory):
     # Known XPM synchronizers are reported as Info/Warning. Unknown crossings
     # require a human review of the named path, not a blanket false-path waiver.
     critical_cdc = re.findall(r'^.*Critical.*$', cdc.read_text(), re.M) if cdc.exists() else []
+    methodology = directory / 'methodology.rpt'
+    critical_methodology = (re.findall(r'^\|\s*(\S+)\s*\|\s*(?:Critical Warning|Error)\s*\|',
+                                      methodology.read_text(), re.M)
+                            if methodology.exists() else [])
     result = {'target': configuration.get('target'), 'requested_clocks_mhz': requested,
               'slack': margins, 'clocks': clocks, 'requested_clocks_matched': clock_matches,
               'timing_passed': all(v >= 0 for v in margins.values()) and
                                all(int(match[i]) == 0 for i in (3, 6, 9)),
               'cdc_report': str(cdc), 'cdc_critical_summary_lines': critical_cdc,
+              'methodology_report': str(methodology) if methodology.exists() else None,
+              'methodology_critical_rules': critical_methodology,
               'bitstream_exists': (directory / 'opentpu_zu3eg.bit').exists()}
     result['memory_path'] = memory_path(directory, configuration)
+    result['input_jitter'] = input_jitter_check(directory, configuration)
     result['passed'] = (result['timing_passed'] and clock_matches and
-                        result['bitstream_exists'] and result['memory_path']['passed'])
+                        result['bitstream_exists'] and result['memory_path']['passed'] and
+                        not critical_methodology and result['input_jitter']['passed'])
     return result
 
 
