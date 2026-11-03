@@ -21,7 +21,7 @@ def main():
     program = json.loads((directory / 'bringup/program_result.json').read_text())
     kernels = [json.loads((run / f'kernel_{fmt}_result.json').read_text())
                for fmt in ('int8', 'int4')]
-    counts = {phase: sum((s.get('tokens', 1) if phase == 'prefill' else 1)
+    counts = {phase: sum(s.get('tokens', 1)
                         for s in result['steps'] if s['phase'] == phase)
               for phase in ('prefill', 'decode')}
     if not result['complete'] or counts != {'prefill': len(result['prefill_tokens']), 'decode': result['decode_steps']}:
