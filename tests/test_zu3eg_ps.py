@@ -73,6 +73,12 @@ def test_ps_bridge_eight_line_scale_cache(depth, writes):
     _run_bridge(depth, read_depth=16, width=256, read_chunks=8, cache_lines=8, write_depth=writes)
 
 
+@pytest.mark.parametrize('width,lines', [(256, 16), (256, 32), (128, 32)])
+def test_ps_bridge_larger_scale_cache_preserves_protocol(width, lines):
+    _run_bridge(64, read_depth=16, width=width, read_chunks=8,
+                cache_lines=lines, write_depth=4)
+
+
 @pytest.mark.parametrize('width,writes', [(128, 2), (256, 4), (256, 8)])
 def test_ps_bridge_pipelines_writes_and_keeps_read_after_write_fences(width, writes):
     _run_bridge(64, read_depth=16, width=width, read_chunks=8, cache_lines=2, write_depth=writes)
@@ -119,7 +125,7 @@ def test_ps_board_kernel_matches_isa(tmp_path, target, fmt, combined, fp_pipe, h
 
 def _compare_ps_core(tmp_path, target, cfg, programs, images, combined, fp_pipe, program_at=None,
                      hp_ports=1, compact_vpu=False, compact_stages=3,
-                     area_buffers=False, narrow_pc=False):
+                     area_buffers=False, narrow_pc=False, cache_lines=1):
     import numpy as np
     from opentpu import isa as I, target as T
     from opentpu.isasim import Machine
@@ -154,6 +160,8 @@ def _compare_ps_core(tmp_path, target, cfg, programs, images, combined, fp_pipe,
         parameters['SEQ_CMD_BRAM'] = int(area_buffers)
         parameters['VPU_COL_BRAM'] = int(area_buffers)
         parameters['SEQ_NARROW_PC'] = int(narrow_pc)
+        parameters['A_CACHE_LINES'] = cache_lines
+        parameters['WORDS'] = cfg.DRAM_BYTES // 4
         if combined:
             parameters.update(READ_DEPTH=16, READ_CHUNKS=4)
         executable = rtlsim.build('tb_ps_core', sources + [
@@ -207,6 +215,25 @@ def test_ps_multi_port_kernel_matches_isa(tmp_path, hp_ports, fmt):
                                     combined=True, fp_pipe=True, hp_ports=hp_ports)
 
 
+@pytest.mark.parametrize('fmt', ['int4', 'int8'])
+def test_ps_one_kib_cache_decode_kernel_matches_isa(tmp_path, fmt):
+    from dataclasses import replace
+    import numpy as np
+    from opentpu import target as T
+    from opentpu.kernels import mlp
+    from opentpu.runtime import Weight, compile_kernel
+    from test_kernels import mlp_args
+    target = 'mys-zu3eg:d64-m2-r6-cl2'
+    cfg = replace(T.config(target), DRAM_BYTES=4 << 20)
+    arguments, _ = mlp_args(np.random.default_rng(413), M=1, H=1024, Fd=512)
+    for value in arguments.values():
+        if isinstance(value, Weight):
+            value.fmt = fmt
+    compiled, images = compile_kernel(mlp, cfg, **arguments)
+    _compare_ps_core(tmp_path, target, cfg, compiled.programs, images, True, True,
+                     hp_ports=2, area_buffers=True, narrow_pc=True, cache_lines=32)
+
+
 @pytest.mark.parametrize('hp_ports', [2])
 def test_ps_multi_port_dependencies_match_isa(tmp_path, hp_ports):
     test_ps_scheduler_pipeline_hazards_and_control(tmp_path, seed=0, fp_pipe=True,
@@ -214,14 +241,17 @@ def test_ps_multi_port_dependencies_match_isa(tmp_path, hp_ports):
 
 
 @pytest.mark.parametrize('hp_ports', [2])
-@pytest.mark.parametrize('dimension,width,reads,chunks,striped', [
-    (64, 256, 16, 8, True),
-    (64, 256, 16, 8, False),
-    (32, 128, 8, 4, True),
-    (64, 256, 16, 1, True),
-    (128, 256, 8, 8, True),
+@pytest.mark.parametrize('dimension,width,reads,chunks,striped,cache_lines', [
+    (64, 256, 16, 8, True, 8),
+    (64, 256, 16, 8, False, 8),
+    (32, 128, 8, 4, True, 4),
+    (64, 256, 16, 1, True, 8),
+    (128, 256, 8, 8, True, 8),
+    (64, 256, 16, 8, True, 32),
+    (64, 128, 16, 8, True, 32),
+    (64, 256, 16, 8, False, 32),
 ])
-def test_ps_multi_port_protocol(tmp_path, hp_ports, dimension, width, reads, chunks, striped):
+def test_ps_multi_port_protocol(tmp_path, hp_ports, dimension, width, reads, chunks, striped, cache_lines):
     sources = [rtlsim.RTL/'boards/mys-zu3eg/otpu_ps_dram.sv',
                rtlsim.RTL/'boards/mys-zu3eg/otpu_ps_dram_multi.sv',
                rtlsim.RTL/'tech/generic/otpu_tech_ram.sv',
@@ -231,7 +261,7 @@ def test_ps_multi_port_protocol(tmp_path, hp_ports, dimension, width, reads, chu
         rtlsim.VFLAGS[rtlsim.VFLAGS.index('-j') + 1] = '2'
         parameters = {'HP_PORTS': hp_ports, 'D': dimension, 'AXI_DATA_WIDTH': width,
                       'READ_DEPTH': reads, 'READ_CHUNKS': chunks,
-                      'A_CACHE_LINES': 4 if width == 128 else 8, 'STRIPE_WEIGHTS': int(striped)}
+                      'A_CACHE_LINES': cache_lines, 'STRIPE_WEIGHTS': int(striped)}
         exe = rtlsim.build('tb_ps_multi', sources, parameters)
         result = rtlsim.run_sim([str(exe)], timeout=45)
         assert result.returncode == 0, result.stdout + result.stderr

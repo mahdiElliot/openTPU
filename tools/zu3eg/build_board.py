@@ -12,7 +12,8 @@ from .settings import AXI_DATA_WIDTH, CORE_MHZ, DEPLOY, HP_PORTS, MEM_MHZ, ROOT,
 from .jtag import quote
 
 
-def specialize_wrapper(path, width, dimension, reads, writes, chunks, cache_lines, stripe_weights=True):
+def specialize_wrapper(path, width, dimension, reads, writes, chunks, cache_lines,
+                       stripe_weights=True, hp_ports=2):
     """Advertise actual bridge limits so AXI IP need not provision maximum queues."""
     text = (ROOT/'rtl/boards/mys-zu3eg/otpu_zu3eg_wrapper.v').read_text()
     limits = {
@@ -22,7 +23,8 @@ def specialize_wrapper(path, width, dimension, reads, writes, chunks, cache_line
                        if stripe_weights else 32*cache_lines//(width//8)),
     }
     # In a legacy one-port build M_AXI includes both traffic classes.
-    limits['M_AXI'] = (*limits['M_AXI'][:2], max(limits['M_AXI'][2], limits['M_META_AXI'][2]))
+    if hp_ports == 1:
+        limits['M_AXI'] = (*limits['M_AXI'][:2], max(limits['M_AXI'][2], limits['M_META_AXI'][2]))
     for bus, (rd, wr, burst) in limits.items():
         pattern = (rf'XIL_INTERFACENAME {bus}, NUM_READ_OUTSTANDING \d+, '
                    r'NUM_WRITE_OUTSTANDING \d+, MAX_BURST_LENGTH \d+')
@@ -71,7 +73,7 @@ def main():
                         choices=('default', 'AreaOptimized_high', 'AreaOptimized_medium'),
                         help='area mapping without changing instruction timing')
     parser.add_argument('--read-depth', type=int, choices=(8, 16, 32), default=8)
-    parser.add_argument('--scale-cache-lines', type=int, choices=(1, 2, 4, 8), default=1,
+    parser.add_argument('--scale-cache-lines', type=int, choices=(1, 2, 4, 8, 16, 32), default=1,
                         help='adjacent 32-byte scale lines per cache fill')
     parser.add_argument('--write-depth', type=int, choices=(1, 2, 4, 8), default=1,
                         help='ordered AXI write-response credits; same-port reads remain fenced')
@@ -96,15 +98,16 @@ def main():
         parser.error('this shell uses the systolic MXU_IMPL=2')
     if target.uarch['TMEM_IMPL'] != 3 or target.uarch.get('TMEM_PMP', 0) != 0:
         parser.error('this shell requires single-copy TMEM_IMPL=3 with TMEM_PMP=0')
-    if 32 * options.scale_cache_lines // (options.axi_data_width//8) > 8:
-        parser.error('eight scale-cache lines require the 256-bit AXI interface')
+    if 32 * options.scale_cache_lines // (options.axi_data_width//8) > 64:
+        parser.error('scale-cache fill exceeds 64 AXI beats')
     files = T.CORE + T.TECH['xilinxus'] + ['asic/otpu_asic_top.sv', 'shell/otpu_ctrl.sv',
             'boards/mys-zu3eg/otpu_ps_dram.sv', 'boards/mys-zu3eg/otpu_ps_dram_multi.sv',
             'boards/mys-zu3eg/otpu_zu3eg_accel.sv']
     wrapper = out/'otpu_zu3eg_wrapper.v'
     interface_limits = specialize_wrapper(wrapper, options.axi_data_width, cfg.D,
                                          options.read_depth, options.write_depth,
-                                         options.read_chunks, options.scale_cache_lines, striped)
+                                         options.read_chunks, options.scale_cache_lines, striped,
+                                         options.hp_ports)
     (out / 'sources.tcl').write_text('set rtl_sources {' + ' '.join(files) + '}\n' +
                                    f'lappend rtl_sources {quote(wrapper)}\n')
     parameters = {k: T.rtl_params(target)[k] for k in (

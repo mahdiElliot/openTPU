@@ -12,7 +12,7 @@ module otpu_ps_dram #(
   parameter int AXI_DATA_WIDTH = 256,
   parameter int READ_DEPTH = 8,
   parameter int READ_CHUNKS = 1,
-  parameter int A_CACHE_LINES = 1, // fetch 1/2/4/8 adjacent 32-byte scale lines
+  parameter int A_CACHE_LINES = 1, // fetch 1/2/4/8/16/32 adjacent 32-byte scale lines
   parameter int WRITE_DEPTH = 1, // ordered BRESP credits; one active W payload
   parameter int A_DEPTH = 4,
   parameter int B_DEPTH = 8,
@@ -66,6 +66,8 @@ module otpu_ps_dram #(
   localparam int BF = $clog2(READ_DEPTH * READ_CHUNKS + 1);
   localparam int AC_LG = 3 + $clog2(A_CACHE_LINES);
   localparam int AIW = A_CACHE_LINES > 1 ? $clog2(A_CACHE_LINES) : 1;
+  localparam int MAX_RBEATS = ((32*A_CACHE_LINES > D) ? 32*A_CACHE_LINES : D) / AXI_BYTES;
+  localparam int RBW = $clog2(MAX_RBEATS) > 3 ? $clog2(MAX_RBEATS) : 3;
   localparam bit WPIPE = WRITE_DEPTH > 1;
   localparam int WP = WPIPE ? $clog2(WRITE_DEPTH) : 1;
   localparam int WC = $clog2(WRITE_DEPTH+1);
@@ -75,8 +77,8 @@ module otpu_ps_dram #(
     if (!(AXI_DATA_WIDTH inside {128, 256}) || D*8 < AXI_DATA_WIDTH)
       $fatal(1, "PS bridge requires AXI_DATA_WIDTH=128/256 and D >= one AXI beat");
     if (!(D inside {32, 64, 128})) $fatal(1, "ZU3EG PS bridge requires D=32,64,128");
-    if (!(A_CACHE_LINES inside {1, 2, 4, 8}) || 32*A_CACHE_LINES/AXI_BYTES > 8)
-      $fatal(1, "Scale cache requires 1/2/4/8 lines and at most eight AXI beats");
+    if (!(A_CACHE_LINES inside {1, 2, 4, 8, 16, 32}) || 32*A_CACHE_LINES/AXI_BYTES > 64)
+      $fatal(1, "Scale cache requires 1/2/4/8/16/32 lines and at most 64 AXI beats");
     if (WRITE_DEPTH < 1 || WRITE_DEPTH > 16 || (WRITE_DEPTH & (WRITE_DEPTH-1)) != 0)
       $fatal(1, "Write credits must be a power of two from 1 through 16");
     if (!(READ_CHUNKS inside {1, 2, 4, 8}) || READ_CHUNKS * D / AXI_BYTES > 256 ||
@@ -109,7 +111,7 @@ module otpu_ps_dram #(
     logic port_b;
     logic [READ_CHUNKS-1:0] tags;
     logic [GP-1:0] chunks_last;
-    logic [2:0] last;
+    logic [RBW-1:0] last;
   } rt_t;
   // Payload arrays have no reset: only valid counts/pointers reset. In particular,
   // a queued B store must not turn into resettable flip-flops for every data bit.
@@ -139,7 +141,7 @@ module otpu_ps_dram #(
   logic [31-AC_LG:0] a_line, cache_line;
   logic [AIW-1:0] a_select;
   logic cache_valid;
-  logic [256*A_CACHE_LINES-1:0] cache_data;
+  logic [255:0] cache_hit_data;
   logic [BF-1:0] b_flight;
   logic [AP:0] a_pending;
   logic [BP+RP+1:0] b_pending;
@@ -158,10 +160,10 @@ module otpu_ps_dram #(
   logic [GP-1:0] ar_chunks_last, rchunk;
   logic [7:0] ar_burst_last;
   logic [39:0] ar_addr;
-  logic [2:0] ar_last;
+  logic [RBW-1:0] ar_last;
   logic [RP-1:0] rh, rt;
   logic [RP:0] rn;
-  logic [2:0] rbeat;
+  logic [RBW-1:0] rbeat;
   logic [D*8-1:0] rpayload, rcomplete;
   // Include the current beat in the assembled response before its register write.
   always_comb begin
@@ -176,6 +178,23 @@ module otpu_ps_dram #(
                 (rbeat == rq[rh].last && rchunk == rq[rh].chunks_last));
   wire a_done = r_done && !rq[rh].port_b;
   wire b_done = chunk_done && rq[rh].port_b;
+  if (A_CACHE_LINES <= 8) begin : g_small_scale_cache
+    logic [256*A_CACHE_LINES-1:0] data;
+    always_ff @(posedge clk) if (r_fire && !rq[rh].port_b)
+      data[AXI_DATA_WIDTH*rbeat +: AXI_DATA_WIDTH] <= m_axi_rdata;
+    assign cache_hit_data = data[256*(A_CACHE_LINES == 1 ? 0 : int'(aq[ah].addr[3 +: AIW])) +: 256];
+  end else begin : g_large_scale_cache
+    // One complete 32-byte line is read on a hit. Separate half-line banks
+    // support the 128-bit bus without duplicating storage or adding a cycle.
+    // LUT RAM avoids a wide register mux when increasing the cached region.
+    for (genvar h = 0; h < 32/AXI_BYTES; h++) begin : g_half
+      (* ram_style = "distributed" *) logic [AXI_DATA_WIDTH-1:0] data[A_CACHE_LINES];
+      always_ff @(posedge clk) if (r_fire && !rq[rh].port_b &&
+                                     int'(rbeat) % (32/AXI_BYTES) == h)
+        data[AIW'(int'(rbeat)/(32/AXI_BYTES))] <= m_axi_rdata;
+      assign cache_hit_data[AXI_DATA_WIDTH*h +: AXI_DATA_WIDTH] = data[aq[ah].addr[3 +: AIW]];
+    end
+  end
   assign m_axi_arvalid = ar_valid && !rst;
   assign m_axi_araddr = ar_addr;
   assign m_axi_arlen = ar_burst_last;
@@ -337,7 +356,7 @@ module otpu_ps_dram #(
         // Round-robin A/B misses. A hits return locally and do not use an AXI slot.
         if (b_issue_ready && (prefer_b || !a_head_read || a_flight || a_hit)) begin
           ar_valid <= 1'b1; ar_port_b <= 1'b1;
-          ar_last <= 3'(D/AXI_BYTES-1);
+          ar_last <= RBW'(D/AXI_BYTES-1);
           if (READ_CHUNKS == 1) begin
             ar_addr <= BASE + {6'd0, bq[bh].addr, 2'd0};
             ar_tags <= READ_CHUNKS'(bq[bh].tag); ar_chunks_last <= '0;
@@ -353,7 +372,7 @@ module otpu_ps_dram #(
           // Align the wider fill to its whole region. It cannot
           // cross a 4-KiB boundary, including when the requested half is odd.
           ar_addr <= BASE + {6'd0, aq[ah].addr[31:AC_LG], {(AC_LG+2){1'b0}}};
-          ar_last <= 3'(32*A_CACHE_LINES/AXI_BYTES-1); ar_tags <= '0; ar_chunks_last <= '0;
+          ar_last <= RBW'(32*A_CACHE_LINES/AXI_BYTES-1); ar_tags <= '0; ar_chunks_last <= '0;
           ar_burst_last <= 8'(32*A_CACHE_LINES/AXI_BYTES-1);
         end
       end
@@ -370,14 +389,13 @@ module otpu_ps_dram #(
       end
       if (a_hit) begin
         a_rvalid <= 1'b1;
-        a_rdata <= cache_data[256*(A_CACHE_LINES == 1 ? 0 : int'(aq[ah].addr[3 +: AIW])) +: 256];
+        a_rdata <= cache_hit_data;
       end
       if (r_fire) begin
         // Capture A's selected line directly from the AXI beats. A wider
         // cache fill does not widen B's chunk buffer or add an assembly mux
         // to the scale response. Valid remains low until the fill completes.
         if (!rq[rh].port_b) begin
-          cache_data[AXI_DATA_WIDTH*rbeat +: AXI_DATA_WIDTH] <= m_axi_rdata;
           if (int'(rbeat)/(32/AXI_BYTES) == int'(a_select))
             a_rdata[AXI_DATA_WIDTH*(int'(rbeat)%(32/AXI_BYTES)) +: AXI_DATA_WIDTH] <= m_axi_rdata;
         end

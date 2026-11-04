@@ -176,8 +176,16 @@ module otpu_mxu
   logic        i_swh;                       // the row's Sw is in the line of its first advance
   logic        i_swn;                       // the next row's Sw is in the advance's line
   logic        i_sws;                       // a request for the row's Sw alone comes first
-  logic [PW:0] occ;                         // chunks issued and not yet popped (<= DEPTH)
-  logic [TDW:0] tg_n;                       // port A requests in flight
+  logic [PW:0] occ;                         // chunks reserved and not yet popped (<= DEPTH)
+  logic [TDW:0] tg_n;                       // reserved A tags: queued, in flight, or at R1
+  // The common address walker reserves matching data/scale entries, then each
+  // port dispatches independently. A scale-cache miss must not stop prefetching
+  // weights, and a busy data port must not prevent scales from getting ahead.
+  (* ram_style = "distributed" *) logic [31:0] bqm [DEPTH], aqm [TD];
+  logic [PW-1:0] bq_h, bq_t;
+  logic [PW:0] bq_n;
+  logic [TDW-1:0] aq_h;
+  logic [TDW:0] aq_n;
 
   // ================================================================== command queue (2)
   // PAIR: 4-bit only; a row is ceil(KB/2) advances of one chunk each. KB is 8 bits, k0 above it
@@ -383,7 +391,9 @@ module otpu_mxu
   wire need_b   = !i_sws && adv_b;
   wire need_a   = !i_unit && (i_sws || !i_rsc || adv_b);
   wire want_iss = i_act && (!need_b || occ < (PW+1)'(DEPTH)) && (!need_a || !tg_n[TDW]);
-  wire go_iss   = want_iss && (!need_b || b_gnt) && (!need_a || a_gnt);
+  wire go_iss   = want_iss;
+  wire b_enqueue = go_iss && need_b;
+  wire a_enqueue = go_iss && need_a;
   // the tag of this cycle's port A request
   typedef struct packed {
     logic [1:0] wf;
@@ -422,11 +432,15 @@ module otpu_mxu
   assign pf_level  = f_count;
   assign pf_starve = more && f_count == 0;
   assign pf_block  = more && f_count != 0 && !pop;
-  assign b_req  = go_iss && need_b;
+  assign b_req  = bq_n != 0 && b_gnt;
   // not gated with b_req: the address (and the slice's parity of it) does not wait for b_gnt
-  assign b_addr = chunk_addr >> 2;
-  assign a_req  = go_iss && need_a;
-  assign a_addr = !a_req ? '0 : (i_sws || i_rsc) ? (srow_addr >> 2) : (scale_addr >> 2);
+  assign b_addr = bqm[bq_h];
+  assign a_req  = aq_n != 0 && a_gnt;
+  assign a_addr = !a_req ? '0 : aqm[aq_h];
+  always_ff @(posedge clk) begin
+    if (b_enqueue) bqm[bq_t] <= chunk_addr >> 2;
+    if (a_enqueue) aqm[tg_t] <= (i_sws || i_rsc) ? (srow_addr >> 2) : (scale_addr >> 2);
+  end
   assign act_blk = 16'(c_ab) + (c_pair ? {ck[14:0], 1'b0} : ck);
   // past an odd KB the high block is not the MM's (block ab + KB, outside its ACT range: a later
   // QACT may be writing it, and the scoreboard does not hold that one back): the high rows read
@@ -454,7 +468,7 @@ module otpu_mxu
     if (rst) begin
       xc_a = 0; xc_sw = 0;
     end else if (go_iss) begin
-      if (a_req) begin
+      if (a_enqueue) begin
         xs_a++; xc_a++;
         if (i_sws) begin xs_sw++; xc_sw++; end
       end
@@ -505,7 +519,7 @@ module otpu_mxu
   // registered with its tag (R1), then written into the scale entry at s_tail (R2)
   atag_t       tgm [TD];
   logic [TDW-1:0] tg_t, tg_h;
-  always_ff @(posedge clk) if (a_req) tgm[tg_t] <= a_tag;
+  always_ff @(posedge clk) if (a_enqueue) tgm[tg_t] <= a_tag;
   logic        rv1;
   logic [255:0] ln1;
   atag_t       tg1;
@@ -1433,6 +1447,7 @@ module otpu_mxu
       i_act <= 1'b0; i_ini <= 1'b0;
       q_n <= '0; pn <= 1'b0; rows_p <= '0;
       occ <= '0; tg_n <= '0; tg_t <= '0; tg_h <= '0;
+      bq_h <= '0; bq_t <= '0; bq_n <= '0; aq_h <= '0; aq_n <= '0;
       f_head <= '0; f_tail <= '0; f_count <= '0; f_rd <= '0; f_tl <= '0; f_rdl <= '0;
       s_head <= '0; s_tail <= '0; s_count <= '0; s_rd <= '0;
       ck <= '0; cg <= '0; dg <= '0; dg1 <= 8'd1; c_left <= '0; c_lz <= 1'b1; cl_ld <= 1'b0; rows_live <= '0;
@@ -1562,12 +1577,17 @@ module otpu_mxu
         f_tail <= f_tail + 1;
         for (int g = 0; g < FG; g++) f_tl[g] <= f_tl[g] + 1;
       end
-      if (a_req) tg_t <= tg_t + 1'b1;
+      if (b_enqueue) bq_t <= bq_t + 1'b1;
+      if (b_req) bq_h <= bq_h + 1'b1;
+      bq_n <= bq_n + (PW+1)'(b_enqueue) - (PW+1)'(b_req);
+      if (a_req) aq_h <= aq_h + 1'b1;
+      aq_n <= aq_n + (TDW+1)'(a_enqueue) - (TDW+1)'(a_req);
+      if (a_enqueue) tg_t <= tg_t + 1'b1;
       if (a_rvalid) tg_h <= tg_h + 1'b1;
-      tg_n <= tg_n + (a_req ? 1'b1 : 1'b0) - (rv1 ? 1'b1 : 1'b0);
+      tg_n <= tg_n + (a_enqueue ? 1'b1 : 1'b0) - (rv1 ? 1'b1 : 1'b0);
       if (r_cpl) s_tail <= s_tail + 1'b1;
       f_count <= f_count + (b_rvalid ? 1 : 0) - (fpop ? 1 : 0);
-      occ <= occ + (b_req ? 1'b1 : 1'b0) - (fpop ? 1'b1 : 1'b0);
+      occ <= occ + (b_enqueue ? 1'b1 : 1'b0) - (fpop ? 1'b1 : 1'b0);
       s_count <= s_count + (r_cpl ? 1 : 0) - ((fpop && !c_unit) ? 1 : 0);
       // ---- pop one advance (the row's last group frees its chunk and scale entry)
       if (fpop) begin
@@ -1689,7 +1709,8 @@ module otpu_mxu
         c_lz <= n.tz;
       end
       // ---- statistics
-      st_c <= {want_iss && !go_iss, !ea && (drain_go || lo.v || rw.v || mx_go || al_go),
+      st_c <= {(aq_n != 0 && !a_gnt) || (bq_n != 0 && !b_gnt),
+               !ea && (drain_go || lo.v || rw.v || mx_go || al_go),
                more && f_count != 0 && !pop, more && f_count == 0};
       st_f <= c_done;
       mx_q <= c_drained && c_rmax && !mx_done && !c_tz;
@@ -1794,6 +1815,11 @@ module otpu_mxu
     if (q_n != 0 && !cl_ld && pop_q != (pn ? n : h))
       $fatal(1, "otpu_mxu: pop_q is not the pop head's entry");
     if (32'(tg_n) > TD) $fatal(1, "otpu_mxu: %0d port A requests in flight", tg_n);
+    if (32'(aq_n) > 32'(tg_n)) $fatal(1, "otpu_mxu: A queue exceeds its tag reservations");
+    if (32'(bq_n) > 32'(occ) || 32'(occ) > DEPTH)
+      $fatal(1, "otpu_mxu: B queue/response reservations overflow");
+    if (32'(s_count) > 32'(occ) || 32'(f_count) > 32'(occ))
+      $fatal(1, "otpu_mxu: response FIFO exceeds its reservations");
     if (32'(s_count) > DEPTH) $fatal(1, "otpu_mxu: scale FIFO overflow (%0d)", s_count);
     if (rv1 && tg_n == 0) $fatal(1, "otpu_mxu: a port A response without a request");
   end

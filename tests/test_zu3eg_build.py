@@ -151,6 +151,25 @@ def test_specialized_axi_interfaces_match_real_queue_limits(tmp_path, striped):
     assert f'M_META_AXI, NUM_READ_OUTSTANDING {reads}, NUM_WRITE_OUTSTANDING 4, MAX_BURST_LENGTH {burst}' in text
 
 
+@pytest.mark.parametrize('width', [128, 256])
+@pytest.mark.parametrize('ports', [1, 2])
+def test_one_kib_scale_fill_advertises_the_correct_port_burst(tmp_path, monkeypatch, width, ports):
+    import sys
+    from tools.zu3eg.build_board import main
+    monkeypatch.setattr(sys, 'argv', ['build_board', '--prepare-only', '--out', str(tmp_path),
+        '--target', 'mys-zu3eg:d64-m2-r6-cl2', '--scale-cache-lines', '32',
+        '--read-depth', '16', '--read-chunks', '8', '--hp-ports', str(ports),
+        '--axi-data-width', str(width)])
+    main()
+    cfg = json.loads((tmp_path/'configuration.json').read_text())
+    fill_beats = 1024//(width//8)
+    bulk_beats = 512//(width//8)
+    assert cfg['scale_cache_lines'] == cfg['rtl_parameters']['BRIDGE_A_CACHE_LINES'] == 32
+    limits = cfg['axi_interface_limits']
+    assert limits['M_META_AXI']['burst'] == fill_beats
+    assert limits['M_AXI']['burst'] == (fill_beats if ports == 1 else bulk_beats)
+
+
 def test_striped_hp_paths_use_equal_priority_and_full_read_credits():
     class Link:
         registers = {CONTROL_BASE+0xc: 8, CONTROL_BASE+0x318: 1}

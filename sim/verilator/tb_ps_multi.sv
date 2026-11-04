@@ -240,6 +240,9 @@ module tb_ps_multi #(parameter int HP_PORTS = 2, D = 64, READ_DEPTH = 16, READ_C
     send_b(1024-CW, 0); send_b(1024, 1); drain();
 
     // A stopped/flush-invalidated miss must not refill a stale scale cache later.
+    // Force a miss even when a larger cached region already contains word 832.
+    @(negedge clk); a_flush = 1;
+    @(negedge clk); a_flush = 0;
     hold_reads = 1;
     old_reads = read_bursts;
     send_a(832);
