@@ -30,6 +30,7 @@ module otpu_ps_dram #(
   input logic [3:0] sw_be,
   output logic sw_rdy,
   input logic b_req, b_we, b_tag,
+  input logic b_write_fence = 1'b0,
   input logic [31:0] b_addr,
   input logic [D*8-1:0] b_wdata,
   input logic [D/4-1:0] b_wmask,
@@ -218,7 +219,7 @@ module otpu_ps_dram #(
   wire w_done = m_axi_bvalid && m_axi_bready;
   wire [1:0] response_port = WPIPE ? wports[wh] : wport;
   wire w_retire = WPIPE ? w_last_fire : w_done;
-  wire [2:0] w_candidates = {bn != 0 && bq[bh].we && b_flight == 0 &&
+  wire [2:0] w_candidates = {bn != 0 && bq[bh].we && b_flight == 0 && !b_write_fence &&
                              gather_count == 0 && !(ar_valid && ar_port_b),
                              an != 0 && aq[ah].we && !a_flight, sn != 0};
   always_comb begin

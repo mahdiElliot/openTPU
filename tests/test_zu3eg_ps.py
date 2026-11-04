@@ -214,17 +214,30 @@ def test_ps_multi_port_dependencies_match_isa(tmp_path, hp_ports):
 
 
 @pytest.mark.parametrize('hp_ports', [2])
-def test_ps_multi_port_protocol(tmp_path, hp_ports):
+@pytest.mark.parametrize('dimension,width,reads,chunks,striped', [
+    (64, 256, 16, 8, True),
+    (64, 256, 16, 8, False),
+    (32, 128, 8, 4, True),
+    (64, 256, 16, 1, True),
+    (128, 256, 8, 8, True),
+])
+def test_ps_multi_port_protocol(tmp_path, hp_ports, dimension, width, reads, chunks, striped):
     sources = [rtlsim.RTL/'boards/mys-zu3eg/otpu_ps_dram.sv',
                rtlsim.RTL/'boards/mys-zu3eg/otpu_ps_dram_multi.sv',
+               rtlsim.RTL/'tech/generic/otpu_tech_ram.sv',
                rtlsim.TB/'otpu_ps_multi_mem.sv', rtlsim.TB/'tb_ps_multi.sv']
     flags = list(rtlsim.VFLAGS)
     try:
         rtlsim.VFLAGS[rtlsim.VFLAGS.index('-j') + 1] = '2'
-        exe = rtlsim.build('tb_ps_multi', sources, {'HP_PORTS': hp_ports})
+        parameters = {'HP_PORTS': hp_ports, 'D': dimension, 'AXI_DATA_WIDTH': width,
+                      'READ_DEPTH': reads, 'READ_CHUNKS': chunks,
+                      'A_CACHE_LINES': 4 if width == 128 else 8, 'STRIPE_WEIGHTS': int(striped)}
+        exe = rtlsim.build('tb_ps_multi', sources, parameters)
         result = rtlsim.run_sim([str(exe)], timeout=45)
         assert result.returncode == 0, result.stdout + result.stderr
         assert 'PS_DRAM_PROTOCOL_PASS' in result.stdout
         assert 'INDEPENDENT_METADATA_PASS' in result.stdout
+        if striped:
+            assert 'STRIPED_WEIGHTS_CONCURRENT_ORDERED_PASS' in result.stdout
     finally:
         rtlsim.VFLAGS[:] = flags

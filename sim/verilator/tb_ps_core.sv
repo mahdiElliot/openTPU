@@ -1,6 +1,6 @@
 // Complete board-control, loader, core and PS-memory-path ISA comparison.
 module tb_ps_core #(
-  parameter int SEQ_WC = 0, VPU_COMPACT_COMP = 0, VPU_COMPACT_STAGES = 3,
+  parameter int SEQ_WC = 0, VPU_COMPACT_COMP = 0, VPU_COMPACT_STAGES = 3, STRIPE_WEIGHTS = 1,
                 VPU_COL_BRAM = 0, SEQ_CMD_BRAM = 0, SEQ_NARROW_PC = 0,
                 HP_PORTS = 1, D = 128, MCOLS = 1, ACT_BLOCKS = 48, ACT_ROWS = 1, MXU_E = 1,
                 AXI_DATA_WIDTH = 256, READ_DEPTH = 8, READ_CHUNKS = 1, WORDS = 1 << 18,
@@ -63,7 +63,7 @@ module tb_ps_core #(
   logic [1:0] s_axi_rresp;
   logic s_axi_rvalid;
   logic s_axi_rready = '0;
-  otpu_zu3eg_accel #(.SEQ_WC(SEQ_WC), .VPU_COMPACT_COMP(VPU_COMPACT_COMP),
+  otpu_zu3eg_accel #(.SEQ_WC(SEQ_WC), .STRIPE_WEIGHTS(STRIPE_WEIGHTS), .VPU_COMPACT_COMP(VPU_COMPACT_COMP),
                       .VPU_COL_BRAM(VPU_COL_BRAM), .SEQ_CMD_BRAM(SEQ_CMD_BRAM),
                       .SEQ_NARROW_PC(SEQ_NARROW_PC),
                       .VPU_COMPACT_STAGES(VPU_COMPACT_STAGES), .HP_PORTS(HP_PORTS), .D(D), .MCOLS(MCOLS), .ACT_BLOCKS(ACT_BLOCKS),

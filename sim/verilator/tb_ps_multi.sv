@@ -2,7 +2,8 @@
 // PS bridge protocol regression: independent AW/W/R stalls, delayed B responses,
 // masked chunk stores, byte stores, tagged reads, and host cache invalidation.
 module tb_ps_multi #(parameter int HP_PORTS = 2, D = 64, READ_DEPTH = 16, READ_CHUNKS = 8,
-                    AXI_DATA_WIDTH = 256, VENDOR_PATH = 0, A_CACHE_LINES = 8, WRITE_DEPTH = 4);
+                    AXI_DATA_WIDTH = 256, VENDOR_PATH = 0, A_CACHE_LINES = 8, WRITE_DEPTH = 4,
+                    STRIPE_WEIGHTS = 1);
   localparam int CW = D/4;
   localparam int STREAM_N = (READ_DEPTH*READ_CHUNKS+8 > 24) ? READ_DEPTH*READ_CHUNKS+8 : 24;
   logic clk = 0, mem_clk = 0;
@@ -33,6 +34,7 @@ module tb_ps_multi #(parameter int HP_PORTS = 2, D = 64, READ_DEPTH = 16, READ_C
   logic [HP_PORTS-1:0] m_axi_bvalid, m_axi_rvalid, m_axi_rlast;
   logic [HP_PORTS-1:0] m_axi_bready, m_axi_rready;
   otpu_ps_dram_multi #(.HP_PORTS(HP_PORTS), .BASE(0), .D(D), .READ_DEPTH(READ_DEPTH), .READ_CHUNKS(READ_CHUNKS),
+    .STRIPE_WEIGHTS(STRIPE_WEIGHTS),
     .B_DEPTH(READ_DEPTH > 8 ? READ_DEPTH : 8), .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
     .A_CACHE_LINES(A_CACHE_LINES), .WRITE_DEPTH(WRITE_DEPTH)) dut (.*);
 
@@ -41,9 +43,13 @@ module tb_ps_multi #(parameter int HP_PORTS = 2, D = 64, READ_DEPTH = 16, READ_C
   otpu_ps_multi_mem #(.HP_PORTS(HP_PORTS), .DATA_WIDTH(AXI_DATA_WIDTH), .READ_DEPTH(READ_DEPTH),
     .WRITE_DEPTH(WRITE_DEPTH)) memory_model (.*);
   logic [31:0] expected [2048];
-  logic [D*8-1:0] want_b [512];
+  logic [D*8-1:0] want_b [4096];
   logic [255:0] want_a [512];
-  bit want_tag [512];
+  bit want_tag [4096];
+  wire [31:0] hp1_buffered;
+  if (STRIPE_WEIGHTS && HP_PORTS == 2) begin
+    assign hp1_buffered = 32'(dut.g_stripe.available[1]);
+  end else assign hp1_buffered = 0;
   int sent_a = 0, sent_b = 0, got_a = 0, got_b = 0;
   // Capture expected data at request acceptance: a later queued write may
   // change memory before an older read returns. Tags and responses stay ordered.
@@ -108,7 +114,7 @@ module tb_ps_multi #(parameter int HP_PORTS = 2, D = 64, READ_DEPTH = 16, READ_C
     send_write_b(at, enables); drain();
   endtask
   initial begin
-    int start_cycles, stream_cycles, stream_max, stream_bursts, old_reads;
+    int start_cycles, stream_cycles, stream_max, stream_bursts, old_reads, old_got, old_hp0, old_hp1;
     for (int i = 0; i < 2048; i++) begin
       memory_model.memory[i] = 32'h56000000 + i;
       expected[i] = memory_model.memory[i];
@@ -121,6 +127,36 @@ module tb_ps_multi #(parameter int HP_PORTS = 2, D = 64, READ_DEPTH = 16, READ_C
     if (got_b == sent_b) $fatal(1, "bulk path was not blocked");
     $display("INDEPENDENT_METADATA_PASS");
     hold_bulk = 0; drain();
+    if (STRIPE_WEIGHTS) begin
+      // One consecutive weight stream must use BOTH ports, even when its first
+      // port stops responding. HP1 fills its response RAM while HP0 is held;
+      // the core must still see no response out of order.
+      old_got = got_b;
+      old_hp0 = memory_model.bursts[0]; old_hp1 = memory_model.bursts[1];
+      hold_bulk = 1;
+      fork
+        begin for (int i = 0; i < STREAM_N; i++) send_b((i%16)*CW, 0); end
+        begin
+          wait (memory_model.bursts[0] > old_hp0 && memory_model.bursts[1] > old_hp1 && hp1_buffered != 0);
+          repeat (16) @(negedge clk);
+          if (got_b != old_got) $fatal(1, "striped read returned out of order");
+          hold_bulk = 0;
+        end
+      join
+      drain();
+      // Wrap both response banks and the global order ring several times.
+      for (int i = 0; i < 4*READ_DEPTH*READ_CHUNKS+19; i++) send_b((i%16)*CW, 0);
+      drain();
+      // A store on HP0 cannot overtake an older read issued through HP1. Younger
+      // reads can queue behind the store while both memory responses are held.
+      hold_reads = 1;
+      send_b(READ_CHUNKS*CW, 0);
+      send_write_b(READ_CHUNKS*CW, '1);
+      send_b(READ_CHUNKS*CW, 0);
+      repeat (12) @(negedge clk);
+      hold_reads = 0; drain();
+      $display("STRIPED_WEIGHTS_CONCURRENT_ORDERED_PASS");
+    end
     write_b(32, '1);
     write_b(32, CW'(32'h55555555));
     for (int i = 0; i < 16; i++) scalar_write(32+i, 32'hd1020304+i, 4'(i));

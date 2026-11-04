@@ -10,6 +10,7 @@ module tb_ps_dram #(parameter int D = 128, READ_DEPTH = 8, READ_CHUNKS = 1,
   always #(500.0/332.8125) mem_clk = !mem_clk;
   always #(VENDOR_PATH ? 500.0/177.5 : 5.0) clk = !clk;
   logic rst = 1, a_flush = 0;
+  wire b_write_fence = 1'b0;
   logic a_req = 0, a_we = 0, sw_req = 0, b_req = 0, b_we = 0, b_tag = 0;
   logic [31:0] a_addr = 0, a_wdata = 0, sw_addr = 0, sw_wdata = 0, b_addr = 0;
   logic [3:0] a_be = 0, sw_be = 0;

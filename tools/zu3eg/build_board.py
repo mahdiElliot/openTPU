@@ -12,12 +12,14 @@ from .settings import AXI_DATA_WIDTH, CORE_MHZ, DEPLOY, HP_PORTS, MEM_MHZ, ROOT,
 from .jtag import quote
 
 
-def specialize_wrapper(path, width, dimension, reads, writes, chunks, cache_lines):
+def specialize_wrapper(path, width, dimension, reads, writes, chunks, cache_lines, stripe_weights=True):
     """Advertise actual bridge limits so AXI IP need not provision maximum queues."""
     text = (ROOT/'rtl/boards/mys-zu3eg/otpu_zu3eg_wrapper.v').read_text()
     limits = {
         'M_AXI': (reads, writes, max(chunks*dimension//(width//8), dimension//(width//8))),
-        'M_META_AXI': (2, writes, 32*cache_lines//(width//8)),
+        'M_META_AXI': (reads if stripe_weights else 2, writes,
+                       max(32*cache_lines//(width//8), chunks*dimension//(width//8))
+                       if stripe_weights else 32*cache_lines//(width//8)),
     }
     # In a legacy one-port build M_AXI includes both traffic classes.
     limits['M_AXI'] = (*limits['M_AXI'][:2], max(limits['M_AXI'][2], limits['M_META_AXI'][2]))
@@ -45,7 +47,9 @@ def main():
     parser.add_argument('--axi-data-width', type=int, choices=(128, 256), default=AXI_DATA_WIDTH,
                         help='bridge AXI width; downsizing to the 128-bit HP port runs at the HP clock')
     parser.add_argument('--hp-ports', type=int, choices=(1, 2), default=HP_PORTS,
-                        help='2: HP0 bulk + HP1 metadata (default); 1: legacy HP0; HP2/HP3 disabled')
+                        help='2: independent HP0/HP1 (default); 1: legacy HP0; HP2/HP3 disabled')
+    parser.add_argument('--stripe-weights', action=argparse.BooleanOptionalAction, default=True,
+                        help='fetch successive weight bursts through HP0 and HP1 concurrently')
     parser.add_argument('--prepare-only', action='store_true', help='write build parameters without starting Vivado')
     parser.add_argument('--memory-stats', action='store_true', help='add per-run memory demand-stall counters')
     parser.add_argument('--scheduler-pipeline', action='store_true',
@@ -81,6 +85,7 @@ def main():
         parser.error('core and HP AXI clocks must be positive and at most 333 MHz')
     target = T.load(options.target)
     cfg = T.config(target)
+    striped = options.stripe_weights and options.hp_ports == 2
     if cfg.S != 1 or cfg.D not in (32, 64, 128) or cfg.DSTEP or cfg.STREAM:
         parser.error('this shell supports S=1, D=32/64/128, DSTEP=STREAM=false')
     if cfg.SEQ_WC and target.uarch['WIN'] > 16:
@@ -99,7 +104,7 @@ def main():
     wrapper = out/'otpu_zu3eg_wrapper.v'
     interface_limits = specialize_wrapper(wrapper, options.axi_data_width, cfg.D,
                                          options.read_depth, options.write_depth,
-                                         options.read_chunks, options.scale_cache_lines)
+                                         options.read_chunks, options.scale_cache_lines, striped)
     (out / 'sources.tcl').write_text('set rtl_sources {' + ' '.join(files) + '}\n' +
                                    f'lappend rtl_sources {quote(wrapper)}\n')
     parameters = {k: T.rtl_params(target)[k] for k in (
@@ -109,6 +114,7 @@ def main():
         'TMEM_GST', 'TMEM_PMP', 'TMEM_PRK', 'TMEM_SDM') if k in T.rtl_params(target)}
     parameters.update(AXI_DATA_WIDTH=options.axi_data_width, CORE_KHZ=round(options.core_mhz * 1000), ARCH_HASH=T.arch_hash(cfg))
     parameters['HP_PORTS'] = options.hp_ports
+    parameters['STRIPE_WEIGHTS'] = int(striped)
     parameters['MEMORY_STATS'] = int(options.memory_stats)
     parameters['SEQ_FP_PIPE'] = int(options.scheduler_pipeline)
     parameters['SEQ_WC'] = int(cfg.SEQ_WC)
@@ -138,7 +144,11 @@ def main():
         'synthesis_directive_scope': 'accelerator and top; vendor IP uses its defaults',
         'ps_pl0_input_mhz': 100, 'input_jitter_ns': 0.100, 'control_base': '0x80000000',
         'ddr_base': '0x10000000', 'ps_boot': 'preserve existing initialized PS DDR; PL-only programming',
-        'memory_bridge': f'queued {options.axi_data_width}-bit bridge, 128-bit HP ports {[0, 1][:options.hp_ports]}, up to {options.read_depth} reads outstanding, up to {options.read_chunks} chunks per read burst, independent writes, {32*options.scale_cache_lines}-byte scale cache',
+        'memory_bridge': f'queued {options.axi_data_width}-bit bridge, 128-bit HP ports {[0, 1][:options.hp_ports]}, up to {options.read_depth} reads outstanding per weight port, up to {options.read_chunks} chunks per read burst, independent writes, {32*options.scale_cache_lines}-byte scale cache',
+        'stripe_weights': striped,
+        'weight_read_ports': [0, 1] if striped else [0],
+        'weight_stripe_bytes': cfg.D*options.read_chunks if striped else None,
+        'weight_response_slots_per_port': max(2,options.read_depth*options.read_chunks) if striped else 0,
         'read_depth': options.read_depth, 'read_chunks': options.read_chunks,
         'hp_ports': [0, 1][:options.hp_ports],
         'scale_cache_lines': options.scale_cache_lines,

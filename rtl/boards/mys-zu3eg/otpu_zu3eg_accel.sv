@@ -3,6 +3,7 @@
 module otpu_zu3eg_accel #(
   parameter int D = 128,
   parameter int HP_PORTS = 2,
+  parameter bit STRIPE_WEIGHTS = 1'b1,
   parameter int AXI_DATA_WIDTH = 256,
   parameter bit MEMORY_STATS = 1'b0,
   parameter bit SEQ_FP_PIPE = 1'b0,
@@ -215,6 +216,7 @@ module otpu_zu3eg_accel #(
             10'h0c3: read_value <= either_stall;
             10'h0c4: read_value <= 32'h4d485031; // MHP1
             10'h0c5: read_value <= 32'(HP_PORTS);
+            10'h0c6: read_value <= 32'(STRIPE_WEIGHTS && HP_PORTS == 2);
             10'h0c8: read_value <= read_beats[0];
             10'h0c9: read_value <= write_beats[0];
             10'h0ca: read_value <= read_beats[1];
@@ -252,7 +254,8 @@ module otpu_zu3eg_accel #(
     .b_rdy, .b_rvalid, .b_rtag, .b_rdata, .wr_idle, .rd_idle,
     .halted, .error(core_error), .wait_to, .a_inval, .icount, .memory_stall
   );
-  otpu_ps_dram_multi #(.HP_PORTS(HP_PORTS), .D(D), .AXI_DATA_WIDTH(AXI_DATA_WIDTH), .READ_DEPTH(BRIDGE_READ_DEPTH),
+  otpu_ps_dram_multi #(.HP_PORTS(HP_PORTS), .STRIPE_WEIGHTS(STRIPE_WEIGHTS),
+    .D(D), .AXI_DATA_WIDTH(AXI_DATA_WIDTH), .READ_DEPTH(BRIDGE_READ_DEPTH),
     .B_DEPTH(BRIDGE_B_DEPTH), .READ_CHUNKS(BRIDGE_READ_CHUNKS),
     .A_CACHE_LINES(BRIDGE_A_CACHE_LINES), .WRITE_DEPTH(BRIDGE_WRITE_DEPTH)) u_ddr (
     .clk, .rst(!aresetn), .a_flush(a_inval || !run),

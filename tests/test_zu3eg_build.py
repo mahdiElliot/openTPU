@@ -57,11 +57,13 @@ def test_wide_memory_path_rejects_bandwidth_bottlenecks(tmp_path, fault, separat
 
 
 @pytest.mark.parametrize('ports', [[0, 1]])
-@pytest.mark.parametrize('fault', [None, 'shared_crossing', 'hp2', 'wrong_clock'])
+@pytest.mark.parametrize('fault', [None, 'shared_crossing', 'hp2', 'wrong_clock', 'low_hp1_credits'])
 def test_multiple_hp_paths_are_independent_and_leave_hp2_unused(tmp_path, ports, fault):
     configuration = {'hp_ports': ports, 'bridge_axi_bits': 256,
-                     'core_mhz': 200, 'mem_mhz': 332.8125, 'separate_mmcm': True}
+                     'core_mhz': 200, 'mem_mhz': 332.8125, 'separate_mmcm': True,
+                     'stripe_weights': True, 'read_depth': 16, 'write_depth': 4}
     design = {'components': {}, 'interface_nets': {}, 'nets': {}}
+    design['components']['accelerator'] = {'interface_ports': {}}
     for hp, bus in zip(ports, ('M_AXI', 'M_META_AXI', 'M_BULK_AXI')):
         suffix = '' if hp == 0 else f'_hp{hp}'
         cross, down = 'memory_clock_converter'+suffix, 'memory_width_converter'+suffix
@@ -73,12 +75,16 @@ def test_multiple_hp_paths_are_independent_and_leave_hp2_unused(tmp_path, ports,
         design['interface_nets'][f'hp{hp}'] = {'interface_ports': [down+'/M_AXI', f'ps/S_AXI_HP{hp}_FPD']}
         design['nets'][f'clock{hp}'] = {'ports': ['memory_clocks/clk_out1', down+'/s_axi_aclk',
                                                  f'ps/saxihp{hp}_fpd_aclk']}
+        design['components']['accelerator']['interface_ports'][bus] = {'parameters': {
+            'NUM_READ_OUTSTANDING': {'value': '16'}, 'NUM_WRITE_OUTSTANDING': {'value': '4'}}}
     if fault == 'shared_crossing':
         design['interface_nets']['core1']['interface_ports'][1] = 'memory_clock_converter/S_AXI'
     elif fault == 'hp2':
         design['interface_nets']['hp1']['interface_ports'][1] = 'ps/S_AXI_HP2_FPD'
     elif fault == 'wrong_clock':
         design['nets']['clock1']['ports'][0] = 'clocks/clk_out1'
+    elif fault == 'low_hp1_credits':
+        design['components']['accelerator']['interface_ports']['M_META_AXI']['parameters']['NUM_READ_OUTSTANDING']['value'] = '2'
     path = tmp_path/'project/opentpu_zu3eg.srcs/sources_1/bd/system/system.bd'
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({'design': design}))
@@ -133,14 +139,39 @@ def test_hp_configuration_rejects_the_wrong_programmed_port_count():
                            'write_depth': 4, 'memory_stats': True})
 
 
-def test_specialized_axi_interfaces_match_real_queue_limits(tmp_path):
+@pytest.mark.parametrize('striped', [False, True])
+def test_specialized_axi_interfaces_match_real_queue_limits(tmp_path, striped):
     from tools.zu3eg.build_board import specialize_wrapper
     p = tmp_path/'wrapper.v'
-    limits = specialize_wrapper(p, 256, 64, 16, 4, 8, 8)
+    limits = specialize_wrapper(p, 256, 64, 16, 4, 8, 8, striped)
     assert limits['M_AXI'] == {'reads': 16, 'writes': 4, 'burst': 16}
-    assert limits['M_META_AXI'] == {'reads': 2, 'writes': 4, 'burst': 8}
+    reads, burst = (16, 16) if striped else (2, 8)
+    assert limits['M_META_AXI'] == {'reads': reads, 'writes': 4, 'burst': burst}
     text = p.read_text()
-    assert 'M_META_AXI, NUM_READ_OUTSTANDING 2, NUM_WRITE_OUTSTANDING 4, MAX_BURST_LENGTH 8' in text
+    assert f'M_META_AXI, NUM_READ_OUTSTANDING {reads}, NUM_WRITE_OUTSTANDING 4, MAX_BURST_LENGTH {burst}' in text
+
+
+def test_striped_hp_paths_use_equal_priority_and_full_read_credits():
+    class Link:
+        registers = {CONTROL_BASE+0xc: 8, CONTROL_BASE+0x318: 1}
+
+        def words(self, address, count=1):
+            if address == CONTROL_BASE+0x310:
+                return [0x4d485031, 2]
+            return [self.registers.get(address, 0xa5a50103)]
+
+        def write_word(self, address, value):
+            self.registers[address] = value
+
+    link = Link()
+    hardware = {'hp_ports': [0, 1], 'read_depth': 16, 'write_depth': 4,
+                'stripe_weights': True, 'memory_stats': True}
+    result = configure(link, hardware)
+    assert [result[p]['read_credits'] for p in ('hp0', 'hp1')] == [16, 16]
+    assert [result[p]['static_qos'] for p in ('hp0', 'hp1')] == [0, 0]
+    link.registers[CONTROL_BASE+0x318] = 0
+    with pytest.raises(RuntimeError, match='striped weight path'):
+        configure(link, hardware)
 
 
 @pytest.mark.parametrize('enabled', [False, True])

@@ -2,6 +2,7 @@
 module otpu_zu3eg_wrapper #(
   parameter integer D = 128,
   parameter integer HP_PORTS = 2,
+  parameter integer STRIPE_WEIGHTS = 1,
   parameter integer AXI_DATA_WIDTH = 256,
   parameter integer MEMORY_STATS = 0,
   parameter integer SEQ_FP_PIPE = 0,
@@ -323,6 +324,7 @@ module otpu_zu3eg_wrapper #(
 
   otpu_zu3eg_accel #(
     .HP_PORTS(HP_PORTS),
+    .STRIPE_WEIGHTS(STRIPE_WEIGHTS),
     .AXI_DATA_WIDTH(AXI_DATA_WIDTH), .MEMORY_STATS(MEMORY_STATS),
     .SEQ_FP_PIPE(SEQ_FP_PIPE),
     .SEQ_CMD_BRAM(SEQ_CMD_BRAM),
