@@ -88,12 +88,16 @@ module otpu_vpu
   parameter int LANES = 8,
   parameter int CL    = (LANES >= 8) ? LANES / 4 : 1,   // lanes with the composite functions
   parameter int SID   = 0,
+  parameter int ADDR_BITS = 20,                       // implemented TMEM address width
   // WBUF: the TMEM grant only takes writes from a two-entry write buffer, and the pipeline
   // advances on a registered enable (buffer room) -- for arbiters whose grant depends only on
   // the VPU's writes (the board's: every read port has its own TMEM copy). 0: everything
   // advances on the grant itself.
   parameter bit WBUF  = 0,
-  parameter bit HAS_SE = 1'b0                         // the stream engine (LANES = 8)
+  parameter bit HAS_SE = 1'b0,                        // the stream engine (LANES = 8)
+  parameter bit COMPACT_COMP = 1'b0,                  // shared composite arithmetic, no stream tail
+  parameter int COMPACT_STAGES = 3,                   // arithmetic stages in the shared loop
+  parameter bit COL_BRAM = 1'b0                       // OUTER buffers, unchanged registered reads
 ) (
   input  logic                    clk,
   input  logic                    rst,
@@ -146,14 +150,14 @@ module otpu_vpu
   localparam int LW = $clog2(LANES);
   // the stream engine: its tail is built for 8 lanes (slot 0's partial loop, RL = 8)
   localparam bit SE = HAS_SE && (LANES == 8);
-  localparam bit C8 = SE;                    // the composites on otpu_se_comp
+  localparam bit C8 = SE || COMPACT_COMP;     // the composites on otpu_se_comp
   localparam int NCL = C8 ? LANES : (CL < LANES) ? CL : LANES;   // composite columns per cycle
   localparam int NLL = C8 ? 0 : NCL;         // long lanes (the composites' slot chains)
   localparam int NSX = C8 ? 1 : NSLOT;       // slots along the lane taps
   localparam int CLW = $clog2(NCL);
   // TMEM word address bits (the TMEM has far fewer words and $fatals past them); the ports
   // zero-extend to 32 bits
-  localparam int AW = 20;
+  localparam int AW = ADDR_BITS;
   // OUTER's column buffers: 256 columns (docs/isa.md) over the lanes
   localparam int CBD = 256 / LANES;
   localparam int CBW = $clog2(CBD);
@@ -262,7 +266,8 @@ module otpu_vpu
   // C8: otpu_se_comp, whose stages are slot 0 (s = 0) and the tail's U (1) and Q (2). A
   // composite chunk is not issued while comp says slot 0 is taken when it would get there
   // (hold: HA = 2 cycles ahead, the read -> mi -> m0 path)
-  localparam int CNS = 3;
+  localparam int CNS = SE ? 3 : COMPACT_COMP ? COMPACT_STAGES : 3;
+  initial if (CNS < 1 || CNS > 3) $fatal(1, "VPU composite loop needs 1..3 stages");
   logic             c_hold, c_hold_n, c_ov, c_s0;
   logic [CNS-1:0]   c_sel;
   f32_t             c_sa [CNS][LANES], c_sb [CNS][LANES], c_sc [CNS][LANES], c_se [CNS][LANES];
@@ -526,17 +531,27 @@ module otpu_vpu
     if (rst) rst_seen <= 1'b1;
     else if (rst_seen && m0d != fdec(m0.func)) $fatal(1, "otpu_vpu: m0d is not m0's func");
 `endif
-  // OUTER's column buffers (LUT RAM): written from the fill chunks' data at m0, read with the
+  // OUTER's column buffers: written from the fill chunks' data at m0, read with the
   // main chunks' data (mi.cb) -- the fill runs >= 2 chunks ahead, so a word is written first
   for (genvar l = 0; l < LANES; l++) begin : g_cbuf
-    f32_t cbuf [CBD], dbuf [CBD];
-    always_ff @(posedge clk) if (en_l[l]) begin
-      if (m0.fill) begin
-        cbuf[m0.cb] <= xb[l];
-        dbuf[m0.cb] <= od_one_b ? F_ONE : od_sc_b ? xa[0] : xa[l];
+    if (COL_BRAM) begin : g_bram
+      otpu_ram_1r1w #(.W(32), .N(CBD), .STYLE("block"), .ZERO(0)) u_c (
+        .clk, .we(en_l[l] && m0.fill), .wa(m0.cb), .wd(xb[l]),
+        .re(en_l[l]), .ra(mi2_d.cb), .rd(xc[l]));
+      otpu_ram_1r1w #(.W(32), .N(CBD), .STYLE("block"), .ZERO(0)) u_d (
+        .clk, .we(en_l[l] && m0.fill), .wa(m0.cb),
+        .wd(od_one_b ? F_ONE : od_sc_b ? xa[0] : xa[l]),
+        .re(en_l[l]), .ra(mi2_d.cb), .rd(xd[l]));
+    end else begin : g_lut
+      f32_t cbuf [CBD], dbuf [CBD];
+      always_ff @(posedge clk) if (en_l[l]) begin
+        if (m0.fill) begin
+          cbuf[m0.cb] <= xb[l];
+          dbuf[m0.cb] <= od_one_b ? F_ONE : od_sc_b ? xa[0] : xa[l];
+        end
+        xc[l] <= cbuf[mi2_d.cb];
+        xd[l] <= dbuf[mi2_d.cb];
       end
-      xc[l] <= cbuf[mi2_d.cb];
-      xd[l] <= dbuf[mi2_d.cb];
     end
   end
 
@@ -963,15 +978,17 @@ module otpu_vpu
   if (C8) begin : g_comp
     f32_t sy [CNS][LANES];
     assign sy[0] = c_s0y;
-    assign sy[1] = c_uy;
-    assign sy[2] = c_qy;
-    otpu_se_comp #(.LANES(LANES), .MW(AW + 1), .NS(CNS), .HA(3), .EXT(1'b1)) u_comp (
+    if (CNS > 1) assign sy[1] = c_uy;
+    if (CNS > 2) assign sy[2] = c_qy;
+    otpu_se_comp #(.LANES(LANES), .MW(AW + 1), .NS(CNS), .HA(3), .EXT(SE)) u_comp (
       .clk, .rst, .en(en_b), .en_l, .in_v(m0.v && m0d.cf), .in_c(m0d.cc), .in_a(c_ia),
       .in_b(c_ib), .in_m(m0.mask), .in_meta({m0.waddr, m0.all_last}), .hold(c_hold),
       .hold_n(c_hold_n),
       .st_sel(c_sel), .st_a(c_sa), .st_b(c_sb), .st_c(c_sc), .st_e(c_se), .st_y(sy),
       .out_v(c_ov), .out_d(c_od), .out_m(c_om), .out_meta(c_ometa));
-    assign c_s0 = c_sel[0];
+    // With no stream engine, comp owns its stages and the ordinary VPU's
+    // slot 0 remains available to elementwise/reduction operations.
+    assign c_s0 = SE && c_sel[0];
   end else begin : g_nocomp
     assign c_hold = 1'b0;
     assign c_hold_n = 1'b0;

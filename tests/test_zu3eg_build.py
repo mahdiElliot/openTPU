@@ -131,3 +131,31 @@ def test_hp_configuration_rejects_the_wrong_programmed_port_count():
     with pytest.raises(RuntimeError, match='HP-port count differs'):
         configure(Link(), {'hp_ports': [0, 1], 'read_depth': 16,
                            'write_depth': 4, 'memory_stats': True})
+
+
+def test_specialized_axi_interfaces_match_real_queue_limits(tmp_path):
+    from tools.zu3eg.build_board import specialize_wrapper
+    p = tmp_path/'wrapper.v'
+    limits = specialize_wrapper(p, 256, 64, 16, 4, 8, 8)
+    assert limits['M_AXI'] == {'reads': 16, 'writes': 4, 'burst': 16}
+    assert limits['M_META_AXI'] == {'reads': 2, 'writes': 4, 'burst': 8}
+    text = p.read_text()
+    assert 'M_META_AXI, NUM_READ_OUTSTANDING 2, NUM_WRITE_OUTSTANDING 4, MAX_BURST_LENGTH 8' in text
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_build_defaults_select_cycle_preserving_area_settings(tmp_path, monkeypatch, enabled):
+    import sys
+    from tools.zu3eg.build_board import main
+    options = ['build_board', '--prepare-only', '--out', str(tmp_path),
+               '--target', 'mys-zu3eg:d64-m2-r6-cl2']
+    if not enabled:
+        options += ['--no-area-buffers', '--no-narrow-pc', '--synth-directive', 'default']
+    monkeypatch.setattr(sys, 'argv', options)
+    main()
+    cfg = json.loads((tmp_path/'configuration.json').read_text())
+    rtl = cfg['rtl_parameters']
+    assert rtl['SEQ_CMD_BRAM'] == rtl['VPU_COL_BRAM'] == rtl['SEQ_NARROW_PC'] == int(enabled)
+    assert rtl['D']*rtl['MCOLS'] == 128 and rtl['LANES'] == 4 and rtl['VPU_CL'] == 2
+    assert rtl['SEQ_WC'] == rtl['VPU_COMPACT_COMP'] == 0
+    assert cfg['synthesis_directive'] == ('AreaOptimized_high' if enabled else 'default')

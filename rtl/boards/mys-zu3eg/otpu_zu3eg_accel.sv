@@ -6,6 +6,8 @@ module otpu_zu3eg_accel #(
   parameter int AXI_DATA_WIDTH = 256,
   parameter bit MEMORY_STATS = 1'b0,
   parameter bit SEQ_FP_PIPE = 1'b0,
+  parameter bit SEQ_CMD_BRAM = 1'b0,
+  parameter bit SEQ_NARROW_PC = 1'b0,
   parameter int BRIDGE_READ_DEPTH = 8,
   parameter int BRIDGE_B_DEPTH = 8,
   parameter int BRIDGE_READ_CHUNKS = 1,
@@ -23,6 +25,10 @@ module otpu_zu3eg_accel #(
   parameter int MXU_E = 1,
   parameter int VPU_CL = 1,
   parameter int ULANES = 4,
+  parameter bit VPU_COMPACT_COMP = 1'b0,
+  parameter int VPU_COMPACT_STAGES = 3,
+  parameter bit VPU_COL_BRAM = 1'b0,
+  parameter bit SEQ_WC = 1'b0,
   parameter int RPB = 32,
   parameter int WPB = 1,
   parameter int TMEM_NSB = 2,
@@ -229,10 +235,14 @@ module otpu_zu3eg_accel #(
     .D(D), .MCOLS(MCOLS), .ACT_BLOCKS(ACT_BLOCKS), .ACT_ROWS(ACT_ROWS),
     .TMEM_WORDS(TMEM_WORDS), .IMEM_WORDS(IMEM_WORDS), .FIFO_DEPTH(FIFO_DEPTH),
     .LANES(LANES), .WIN(WIN), .MXU_IMPL(2), .MXU_CL(MXU_CL), .MXU_E(MXU_E),
-    .VPU_CL(VPU_CL), .ULANES(ULANES), .HAS_DSTEP(0), .TMEM_IMPL(3),
+    .VPU_CL(VPU_CL), .ULANES(ULANES), .VPU_COMPACT_COMP(VPU_COMPACT_COMP),
+    .VPU_COMPACT_STAGES(VPU_COMPACT_STAGES),
+    .VPU_COL_BRAM(VPU_COL_BRAM),
+    .HAS_DSTEP(0), .TMEM_IMPL(3),
     .RPB(RPB), .WPB(WPB), .TMEM_NSB(TMEM_NSB), .TMEM_SBP(TMEM_SBP), .TMEM_SBH(TMEM_SBH),
     .TMEM_RPL(TMEM_RPL), .TMEM_TDP(TMEM_TDP), .TMEM_GST(TMEM_GST), .TMEM_PMP(TMEM_PMP), .TMEM_PRK(TMEM_PRK), .TMEM_SDM(TMEM_SDM),
-    .SEQ_WC(0), .COLL_GATHER(0), .MEMORY_STATS(MEMORY_STATS), .SEQ_FP_PIPE(SEQ_FP_PIPE)
+    .SEQ_WC(SEQ_WC), .COLL_GATHER(0), .MEMORY_STATS(MEMORY_STATS), .SEQ_FP_PIPE(SEQ_FP_PIPE),
+    .SEQ_CMD_BRAM(SEQ_CMD_BRAM), .SEQ_NARROW_PC(SEQ_NARROW_PC)
   ) u_core (
     .clk, .sys_rst(!aresetn), .rst(!aresetn || !run), .rinit,
     .ld_start, .ld_addr, .ld_n, .ld_busy,
@@ -295,7 +305,7 @@ module otpu_zu3eg_accel #(
     .CHASH(0), .DSTEP(0), .HOSTCAL(0), .COLL_GATHER(0),
     .S(1), .TMEM_WORDS(TMEM_WORDS), .IMEM_WORDS(IMEM_WORDS), .ACT_BLOCKS(ACT_BLOCKS),
     .DRAM_LOG2(31), .NCH(1), .CH_LOG2(31), .MXU_IMPL(2), .TMEM_IMPL(3),
-    .VPU_CL(VPU_CL), .ULANES(ULANES), .SEQ_WC(0), .PLATFORM(3), .ARCH_HASH(ARCH_HASH)
+    .VPU_CL(VPU_CL), .ULANES(ULANES), .SEQ_WC(SEQ_WC), .PLATFORM(3), .ARCH_HASH(ARCH_HASH)
   ) u_ctrl (
     .clk, .rst(!aresetn),
     .s_awaddr(s_axi_awaddr),

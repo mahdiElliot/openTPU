@@ -69,8 +69,13 @@ def program(link, hardware):
             'hp_configuration': hp_configuration}
 
 
-def measure_clock(link, expected_mhz=CORE_MHZ):
-    words = np.asarray(I.assemble([I.loop(1, 0xffffffff), I.nop(), I.halt()]), dtype='<u4')
+def measure_clock(link, expected_mhz=CORE_MHZ, cfg=None):
+    program = [I.loop(1, 0xffffffff), I.nop(), I.halt()]
+    if cfg is None:
+        words = np.asarray(I.assemble(program), dtype='<u4')
+    else:
+        from .jtag import program_words
+        words = program_words(cfg, program)
     logical_address = 0x3f000000
     link.write(0x10000000 + logical_address, words)
     code = '''
@@ -106,7 +111,8 @@ def main():
     link = Jtag(options.out)
     try:
         result = program(link, options.hardware)
-        result['clock_measurement'] = measure_clock(link, result['core_khz'] / 1000)
+        result['clock_measurement'] = measure_clock(
+            link, result['core_khz'] / 1000, T.config(result['target']))
         (options.out / 'program_result.json').write_text(json.dumps(result, indent=2) + '\n')
         print(json.dumps(result, indent=2), flush=True)
     finally:

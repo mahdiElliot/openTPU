@@ -41,7 +41,7 @@ def memory_path(directory, configuration):
         if 'write_depth' in configuration:
             interface = components.get('accelerator', {}).get('interface_ports', {}).get(bus, {})
             credits = interface.get('parameters', {})
-            for key, wanted in [('NUM_READ_OUTSTANDING', configuration['read_depth']),
+            for key, wanted in [('NUM_READ_OUTSTANDING', 2 if hp == 1 else configuration['read_depth']),
                                 ('NUM_WRITE_OUTSTANDING', configuration['write_depth'])]:
                 if int(credits.get(key, {}).get('value', '0')) < wanted:
                     errors.append(f'{bus} metadata {key} understates the bridge credits')

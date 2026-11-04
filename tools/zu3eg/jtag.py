@@ -10,11 +10,24 @@ from pathlib import Path
 import numpy as np
 
 from opentpu import isa as I
+from opentpu import waits as W
 from opentpu.isasim import Machine
 
 ROOT = Path(__file__).resolve().parents[2]
 DDR_BASE = 0x10000000
 CONTROL_BASE = 0x80000000
+
+
+def program_words(cfg, program):
+    """Transport words, including compiler dependency entries when required."""
+    words = np.asarray(I.assemble(program), dtype='<u4')
+    if words.size > cfg.IMEM_WORDS:
+        raise ValueError('Program exceeds IMEM')
+    if not getattr(cfg, 'SEQ_WC', False):
+        return words
+    from .wait_cache import entries as cached_entries
+    entries = cached_entries(words, cfg, program)
+    return W.loadable(words, entries, cfg.D)
 
 
 def quote(value):
@@ -112,7 +125,7 @@ class JtagBackend:
         self.checks = []
         self.image_bytes = len(images[0])
         self.program_at = (self.image_bytes + 4095) & ~4095
-        if DDR_BASE + self.program_at + cfg.IMEM_WORDS * 4 >= 0x80000000:
+        if DDR_BASE + self.program_at + W.area(cfg.IMEM_WORDS, cfg.SEQ_WC) >= 0x80000000:
             raise ValueError('Image and program must fit the physical 2-GiB DDR')
         image = np.asarray(images[0], dtype=np.uint8)
         if not upload:
@@ -146,10 +159,11 @@ class JtagBackend:
                 raise RuntimeError(f'Board/ISA mismatch: {different} bytes at {addr:#x}')
         return result
 
+    def slot_words(self, program):
+        return program_words(self.cfg, program)
+
     def run(self, programs, args=None):
-        words = np.asarray(I.assemble(programs[0]), dtype='<u4')
-        if words.size > self.cfg.IMEM_WORDS:
-            raise ValueError('Program exceeds IMEM')
+        words = self.slot_words(programs[0])
         if self.reference is not None:
             self.reference.load(programs, args).run(max_steps=1 << 40)
         self.link.write(DDR_BASE + self.program_at, words)

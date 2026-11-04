@@ -52,6 +52,9 @@ module otpu_slice
   parameter int QUANT_XD   = 1024,    // quantizer row buffer chunks (0: two passes over TMEM; otpu_quant XD)
   parameter int VPU_CL     = (LANES >= 8) ? LANES / 4 : 1,  // VPU lanes with the composite functions
   parameter int ULANES     = LANES,   // TMEM lanes of the MXU and the quantizer (<= LANES)
+  parameter bit VPU_COMPACT_COMP = 1'b0,
+  parameter int VPU_COMPACT_STAGES = 3,
+  parameter bit VPU_COL_BRAM = 1'b0,
   parameter int PQ_WIN     = 64,      // cycles per P/Q counter window (+bucket= in simulation)
   parameter bit HAS_DSTEP  = 1'b1,    // streams (DSTEP, STREAM): SE's tail in the VPU
   parameter int TMEM_IMPL  = 0,       // TMEM: 0 a copy per read port (FPGA block RAM), 1 banked
@@ -81,7 +84,9 @@ module otpu_slice
   parameter int TMEM_SDM   = -1,      // TMEM_TDP: the read ports' RAM sides (bit p: port p on
                                       //   port A; -1: TM_SIDED, below)
   parameter bit SEQ_WC     = 1'b0,    // EXPERIMENTAL: otpu_seq's wait counts (WAITC, docs/seq_vpu.md)
-  parameter bit SEQ_FP_PIPE = 1'b0
+  parameter bit SEQ_FP_PIPE = 1'b0,
+  parameter bit SEQ_CMD_BRAM = 1'b0,
+  parameter bit SEQ_NARROW_PC = 1'b0
 ) (
   input  logic          clk,
   input  logic          clk_f,      // TMEM_PMP 1: 2 x clk, rising with it (the MMCM's); else unused
@@ -246,7 +251,8 @@ module otpu_slice
   logic        dma_err;           // a WAITW timed out: the slice stops with an error (to_err)
   logic [31:0] sq_icount, sq_cha, sq_chn, rl_val;
   otpu_seq #(.IMEM_WORDS(IMEM_WORDS), .TMEM_WORDS(TMEM_WORDS), .SID(SID), .S(S), .D(D),
-             .WIN(WIN), .STREAMS(HAS_SS), .WAITC(SEQ_WC), .FP_PIPE(SEQ_FP_PIPE)) u_seq (
+             .WIN(WIN), .STREAMS(HAS_SS), .WAITC(SEQ_WC), .FP_PIPE(SEQ_FP_PIPE),
+             .CMD_BRAM(SEQ_CMD_BRAM), .NARROW_PC(SEQ_NARROW_PC)) u_seq (
     .clk, .rst(srst), .ucmd(ucmd_s), .ustart(ustart_s), .urel, .urdy(urdy_s), .udone(udone_s),
     .halted(sq_halted), .error(sq_err),
     .icount(sq_icount), .ev(sq_ev), .rinit, .rl_v, .rl_val, .ch_req(sq_ch), .ch_addr(sq_cha),
@@ -538,7 +544,10 @@ module otpu_slice
     .a_req(q_areq), .a_we(q_awe), .a_addr(q_aaddr), .a_wdata(q_awdata), .a_be(q_abe),
     .pf_u(q_u), .pf_frz(q_frz));
 
-  otpu_vpu #(.LANES(LANES), .CL(VPU_CL), .SID(SID), .WBUF(ARB_MASK), .HAS_SE(HAS_SS)) u_vpu (
+  otpu_vpu #(.LANES(LANES), .CL(VPU_CL), .SID(SID), .ADDR_BITS($clog2(TMEM_WORDS)),
+             .WBUF(ARB_MASK), .HAS_SE(HAS_SS),
+             .COMPACT_COMP(VPU_COMPACT_COMP), .COMPACT_STAGES(VPU_COMPACT_STAGES),
+             .COL_BRAM(VPU_COL_BRAM)) u_vpu (
     .clk, .rst(rst_vpu), .start(ustart[U_VPU]), .cmd(ucmd[U_VPU]), .rdy(r_vpu), .done(d_vpu),
     .gnt(gnt[G_VPU]), .ren(v_ren), .rhold(tm_lost[P_VA] || tm_lost[P_VB]),
     .ta_en(va_ren), .ta_addr(va_raddr), .ta_data(r_data[P_VA]),

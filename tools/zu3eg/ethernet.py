@@ -157,14 +157,14 @@ class EthernetBackend(JtagBackend):
         if not hasattr(self, '_prepared'):
             self._prepared = {}
         program = programs[0]
-        self._prepared[id(program)] = (program, np.asarray(I.assemble(program), dtype='<u4'))
+        self._prepared[id(program)] = (program, self.slot_words(program))
 
     def start(self, programs, args=None):
         if self.reference is not None:
             raise ValueError('Use the separate ISA reference for asynchronous board verification')
         prepared = getattr(self, '_prepared', {}).pop(id(programs[0]), None)
-        words = prepared[1] if prepared is not None else np.asarray(I.assemble(programs[0]), dtype='<u4')
-        if words.size > self.cfg.IMEM_WORDS:
+        words = prepared[1] if prepared is not None else self.slot_words(programs[0])
+        if len(programs[0])*8 > self.cfg.IMEM_WORDS:
             raise ValueError('Program exceeds IMEM')
         self.link.write(DDR_BASE + self.program_at, words)
         self.link.start_program(self.program_at, len(programs[0]), list(args or []))

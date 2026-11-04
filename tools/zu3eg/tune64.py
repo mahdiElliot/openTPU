@@ -49,8 +49,9 @@ def measure(out, cfg, parameters, spec, weights, rows, head, bridge_source=None)
     programs = (image.compile_step(32) if rows == 1 else
                 image.compile_rows([(0, p) for p in positions], [rows-1] if head else []))
     at = (len(payload) + 4095) & ~4095
-    words = np.asarray(I.assemble(programs[0]), dtype='<u4').view(np.uint8)
-    assert words.size <= cfg.IMEM_WORDS * 4
+    from .jtag import program_words
+    words = program_words(cfg, programs[0]).view(np.uint8)
+    assert len(programs[0])*8 <= cfg.IMEM_WORDS
     dram = np.zeros(cfg.DRAM_BYTES, dtype=np.uint8)
     dram[:payload.size] = payload
     dram[at:at+words.size] = words
@@ -92,6 +93,11 @@ def measure(out, cfg, parameters, spec, weights, rows, head, bridge_source=None)
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--target', default='mys-zu3eg:d64-m2-r4-cl2')
+    parser.add_argument('--compact-vpu', action='store_true')
+    parser.add_argument('--compact-stages', type=int, choices=(1, 2, 3), default=3)
+    parser.add_argument('--area-buffers', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--narrow-pc', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--fifo', type=int, choices=(64, 128, 256), default=128)
     parser.add_argument('--rows', type=int, choices=(2, 4, 6), default=4)
     parser.add_argument('--capacity-rows', type=int, choices=(2, 4, 6),
@@ -104,7 +110,8 @@ def main():
     parser.add_argument('--cache-lines', type=int, choices=(1, 2, 4, 8), default=1)
     parser.add_argument('--bridge-source', type=Path, help='isolated bridge prototype for screening')
     parser.add_argument('--writes', type=int, choices=(1, 2, 4, 8), default=1)
-    parser.add_argument('--window', type=int, choices=(8, 16), default=8)
+    parser.add_argument('--window', type=int, choices=(2, 4, 8, 16), default=8)
+    parser.add_argument('--tmem-subbanks', type=int, choices=(1, 2, 4), default=4)
     parser.add_argument('--vpu-cl', type=int, choices=(1, 2, 4), default=2)
     parser.add_argument('--kinds', default='linear,attn')
     parser.add_argument('--phases', default='prefill,decode')
@@ -113,9 +120,14 @@ def main():
         os.environ[key] = '0'
     os.environ['OTPU_Q35_ROWS_OVERLAP'] = '1'
     rtlsim.VFLAGS[rtlsim.VFLAGS.index('-j')+1] = '2'
-    cfg = replace(T.config('mys-zu3eg:d64-m2-r4-cl2'), ACT_ROWS=options.capacity_rows or options.rows)
-    parameters = dict(HP_PORTS=options.hp_ports, MXU_E=options.epilogue, FIFO_DEPTH=options.fifo,
-                      TMEM_NSB=4, TMEM_SBH=1, VPU_CL=options.vpu_cl, WIN=options.window, SEQ_FP_PIPE=1,
+    cfg = replace(T.config(options.target), ACT_ROWS=options.capacity_rows or options.rows)
+    parameters = dict(SEQ_WC=int(cfg.SEQ_WC), VPU_COMPACT_COMP=int(options.compact_vpu),
+                      VPU_COMPACT_STAGES=options.compact_stages,
+                      SEQ_CMD_BRAM=int(options.area_buffers), VPU_COL_BRAM=int(options.area_buffers),
+                      SEQ_NARROW_PC=int(options.narrow_pc),
+                      HP_PORTS=options.hp_ports, MXU_E=options.epilogue, FIFO_DEPTH=options.fifo,
+                      TMEM_NSB=options.tmem_subbanks, TMEM_SBH=int(options.tmem_subbanks > 1),
+                      VPU_CL=options.vpu_cl, WIN=options.window, SEQ_FP_PIPE=1,
                       READ_DEPTH=options.reads, READ_CHUNKS=options.chunks,
                       A_CACHE_LINES=options.cache_lines,
                       WRITE_DEPTH=options.writes,

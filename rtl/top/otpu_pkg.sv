@@ -193,7 +193,8 @@ package otpu_pkg;
   // partial products: low 32 bits of a * w[15:0], low 16 bits of a * w[31:16] (one DSP each)
   typedef struct packed { logic [3:0][31:0] pl; logic [3:0][15:0] ph; } fpp_t;
 
-  function automatic fpo_t fp_ops(input cmd_t c, input int D, input int S);
+  function automatic fpo_t fp_ops(input cmd_t c, input int D, input int S,
+                                input bit streams = 1'b1);
     fpo_t o;
     logic [31:0] rows, n, kb, m;
     o = '0;
@@ -223,7 +224,7 @@ package otpu_pkg;
         o.a[1] = 24'(rows - 1); o.w[1] = 32'(c.w6[15:0]);
         o.a[2] = 24'(rows - 1); o.w[2] = 32'(c.w5[15:0]);
       end
-      OP_DSTEP: begin
+      OP_DSTEP: if (streams) begin
         o.a[0] = 24'(32'(c.w4[15:0]) - 1); o.w[0] = 32'(c.w4[31:16]);
       end
       OP_GATHER: begin
@@ -259,7 +260,8 @@ package otpu_pkg;
     return fp_sum(fp_part(fp_ops(c, D, S)));
   endfunction
 
-  function automatic fp_t fp_ranges(input cmd_t c, input fpm_t p, input int D, input int S);
+  function automatic fp_t fp_ranges(input cmd_t c, input fpm_t p, input int D, input int S,
+                                  input bit streams = 1'b1);
     fp_t f;
     logic [31:0] rows, cols, n, kb, m;
     f = '0;
@@ -272,7 +274,7 @@ package otpu_pkg;
         f.rd[0] = mk(SP_TMEM, c.w2, c.w3);
         f.wr[0] = mk(SP_DRAM, c.w1, c.w3 << 2);
       end
-      OP_STREAM: begin
+      OP_STREAM: if (streams) begin
         // the shape is in the descriptor, which the sequencer cannot read: the hardware
         // subset's largest (rows, cols <= 256; docs/stream.md 4.4), src read and written (in
         // place) and dst written (the same range, or one apart from it); o written; read: the
@@ -286,7 +288,7 @@ package otpu_pkg;
         f.rd[2] = mk(SP_TMEM, c.w5, 32'd256);
         f.rd[3] = mk(SP_TMEM, c.w6, 32'(c.w1[31:16]) + 32'd1);
       end
-      OP_DSTEP: begin
+      OP_DSTEP: if (streams) begin
         // the state is read and written in place (a write range); q | k, v, decay .. beta
         // are read, o written
         rows = 32'(c.w4[15:0]); cols = 32'(c.w4[31:16]);

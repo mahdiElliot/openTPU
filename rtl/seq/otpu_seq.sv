@@ -47,7 +47,9 @@ module otpu_seq
   // instruction, a mask of the VPU instructions 1..31 back it waits for. No footprints, no range
   // compares. 0: today's scoreboard.
   parameter bit WAITC      = 1'b0,
-  parameter bit FP_PIPE    = 1'b0     // register raw ranges before footprint compaction
+  parameter bit FP_PIPE    = 1'b0,    // register raw ranges before footprint compaction
+  parameter bit CMD_BRAM   = 1'b0,    // command copies keep the same registered read in BRAM
+  parameter bit NARROW_PC  = 1'b0     // bound instruction addresses to the physical IMEM
 ) (
   input  logic                clk,
   input  logic                rst,
@@ -80,16 +82,20 @@ module otpu_seq
   localparam int IPR = D / 32;                   // instructions per IMEM row
   localparam int NROW = IMEM_WORDS / (8 * IPR);
   localparam int RW = $clog2(NROW);
+  // One extra bit represents the address just past IMEM. Loop trip counts and elapsed
+  // cycles stay 32 bits; only instruction addresses and loop body lengths are narrowed.
+  localparam int PW = NARROW_PC ? $clog2(IMEM_WORDS / 8) + 1 : 32;
   initial if (D % 32 != 0) $fatal(1, "otpu_seq: D must be a multiple of 32");
   logic [D*8-1:0] irow;           // the RAM output: the row holding fa
   logic [255:0]   ir;             // the instruction at pc
   logic           ir_v;           // ir is valid (0 only in the first cycle after reset)
-  logic [31:0]    fa, fa_d;       // the pc R moves to next; its next value
-  logic [31:0]    fa_n;           // fa's next value when it moves (the RAM address)
+  logic [PW-1:0]  fa, fa_d;       // the pc R moves to next; its next value
+  logic [PW-1:0]  fa_n;           // fa's next value when it moves (the RAM address)
   logic           fe;             // fa moves (the RAM's read enable; otherwise it keeps fa's row)
   logic           ld;             // R moves on to the instruction at fa
 
-  logic [31:0] pc, cyc;
+  logic [PW-1:0] pc;
+  logic [31:0] cyc;
   logic [31:0] R [16];
   logic        stopping;         // HALT fetched: wait for the window to drain
   logic        rl_wait;          // an RLD is out: R holds until its value is back
@@ -97,13 +103,14 @@ module otpu_seq
 
   // loop stack
   logic [2:0]  sp;
-  logic [31:0] stk_start [4];
-  logic [31:0] stk_end   [4];
+  logic [PW-1:0] stk_start [4];
+  logic [PW-1:0] stk_end   [4];
   logic [31:0] stk_rem   [4];
   // LOOP takes two cycles: the first registers the trip count and body length (pc holds), the
   // second enters or skips the loop from registers -- keeps the add off the fetch-address path
   logic        lp;
-  logic [31:0] lp_cnt, lp_len;
+  logic [31:0] lp_cnt;
+  logic [PW-1:0] lp_len;
 
   // The footprint as the window keeps it: ranges stored by space, so ranges in different
   // spaces, and two reads, are never compared. No valid bits: an invalid range has hi = 0,
@@ -186,7 +193,7 @@ module otpu_seq
       OP_ST: begin
         s.dw = 1'b1; s.d[0] = r32(f.wr[0]); t0 = f.rd[0];
       end
-      OP_DSTEP, OP_STREAM: begin   // (DSTEP's wr2 is empty)
+      OP_DSTEP, OP_STREAM: if (STREAMS) begin   // (DSTEP's wr2 is empty)
         s.dw = 1'b1; s.d[0] = r32(f.wr[0]); s.d[1] = r32(f.wr[2]);
         t0 = f.wr[1]; w0 = 1'b1; t1 = f.rd[0]; t2 = f.rd[1]; t3 = f.rd[2]; t4 = f.rd[3];
       end
@@ -480,7 +487,7 @@ module otpu_seq
   // LD's and ST's w3 (n), GATHER's w3 (rows, cols) (the enables decode the opcode beside the
   // register reads)
   cmd_t dcmd;
-  wire  is_str = (op == OP_STREAM);
+  wire  is_str = STREAMS && (op == OP_STREAM);
   wire  rel2 = (op != OP_QACT);
   wire  rel3 = !(op == OP_QACT || op == OP_LD || op == OP_ST || op == OP_GATHER);
   always_comb begin
@@ -545,7 +552,7 @@ module otpu_seq
   // ---- free slot and the new instruction's dependencies
   logic [SW-1:0]   free_slot;
   logic [WIN-1:0]  ndep, ndepd;
-  always_comb q_fp = fp_ranges(q_cmd, q_pr, D, S);
+  always_comb q_fp = fp_ranges(q_cmd, q_pr, D, S, STREAMS);
   always_comb begin
     have_free = 1'b0; free_slot = '0;
     for (int i = WIN - 1; i >= 0; i--)
@@ -706,10 +713,10 @@ module otpu_seq
   logic        adv;              // R's instruction retires or is handed over this cycle
   logic        hit1, hit2;       // fa ends the loop on top of the stack / the one below it
   logic        hit;              // fa's successor is a loop start ...
-  logic [31:0] hit_pc;           // ... this one
+  logic [PW-1:0] hit_pc;         // ... this one
   logic        lp_z;             // the LOOP's trip count (R[ra] + iw[2]) is 0
   logic [31:0] lp_a;
-  logic [31:0] succ;
+  logic [PW-1:0] succ;
   always_comb begin
     case (op)
       OP_NOP, OP_LI, OP_ADDI: adv = 1'b1;
@@ -857,7 +864,6 @@ module otpu_seq
   always_ff @(posedge clk) c_cmd_w <= c_cmd;
   logic [SW-1:0] ucs [NUNITS];
   for (genvar u = 0; u < NUNITS; u++) begin : g_cmd
-    (* ram_style = "distributed" *) logic [$bits(cmd_t)-1:0] m [WIN];
     logic [$bits(cmd_t)-1:0] q;
     logic          we;
     logic [SW-1:0] wa;
@@ -870,15 +876,26 @@ module otpu_seq
       assign we = !rst && c_go;
       assign wa = free_slot;
     end
-    always_ff @(posedge clk) if (we) m[wa] <= WAITC ? c_cmd_w : c_cmd;
-    always_ff @(posedge clk) if (!rst && q_en) q <= m[start_slot[u]];
+    if (CMD_BRAM) begin : g_bram
+      // The original LUT RAM already registered its read. Keep that exact enable and
+      // latency, including read-first behavior when dispatch writes the selected slot.
+      otpu_ram_1r1w #(.W($bits(cmd_t)), .N(WIN), .STYLE("block"), .ZERO(0)) u_mem (
+        .clk, .we, .wa, .wd(WAITC ? c_cmd_w : c_cmd),
+        .re(!rst && q_en), .ra(start_slot[u]), .rd(q));
+    end else begin : g_lut
+      (* ram_style = "distributed" *) logic [$bits(cmd_t)-1:0] m [WIN];
+      always_ff @(posedge clk) if (we) m[wa] <= WAITC ? c_cmd_w : c_cmd;
+      always_ff @(posedge clk) if (!rst && q_en) q <= m[start_slot[u]];
+    end
     assign ucmd[u] = cmd_t'(q);
 `ifndef SYNTHESIS
+    cmd_t shadow [WIN];
+    always_ff @(posedge clk) if (we) shadow[wa] <= WAITC ? c_cmd_w : c_cmd;
     // the copy is the started slot's command when the unit reads it (at ustart; the collective
     // while its request is pending); no start reads a slot whose write is still on its way
     always @(posedge clk) begin
       if (!rst && (ustart[u] || (u == U_COLL && !urdy[u])) && sv[ucs[u]] && sstarted[ucs[u]]
-          && soh[ucs[u]][u] && q != m[ucs[u]])
+          && soh[ucs[u]][u] && q != shadow[ucs[u]])
         $fatal(1, "otpu_seq: unit %0d's command is not slot %0d's", u, ucs[u]);
       if (!rst && can_start[u] && !q_en)
         $fatal(1, "otpu_seq: unit %0d starts without loading its command", u);
@@ -1167,7 +1184,7 @@ module otpu_seq
           s_v <= p_v;
           if (p_v) begin
             s_cmd <= p_cmd; s_unit <= p_unit; s_pc <= p_pc;
-            s_pp <= fp_part(fp_ops(p_cmd, D, S));
+            s_pp <= fp_part(fp_ops(p_cmd, D, S, STREAMS));
           end
         end
       end

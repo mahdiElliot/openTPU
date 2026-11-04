@@ -33,6 +33,9 @@ module otpu_asic_top
   parameter int MXU_E      = 0,         // the MXU's epilogue lanes (otpu_slice; 0: MCOLS / 2)
   parameter int VPU_CL     = 2,
   parameter int ULANES     = LANES,
+  parameter bit VPU_COMPACT_COMP = 1'b0,
+  parameter int VPU_COMPACT_STAGES = 3,
+  parameter bit VPU_COL_BRAM = 1'b0,
   parameter bit HAS_DSTEP  = 1'b1,
   parameter int TMEM_IMPL  = 1,         // the TMEM (otpu_slice): 1 banked, 3 one copy
   parameter int RPB        = 1,
@@ -49,7 +52,9 @@ module otpu_asic_top
   parameter bit SEQ_WC     = 1'b0,      // the sequencer's wait entries (otpu_slice)
   parameter bit COLL_GATHER = 1'b1,     // 0: the collective unit runs BAR alone (otpu_coll_bar)
   parameter bit MEMORY_STATS = 1'b0,
-  parameter bit SEQ_FP_PIPE = 1'b0
+  parameter bit SEQ_FP_PIPE = 1'b0,
+  parameter bit SEQ_CMD_BRAM = 1'b0,
+  parameter bit SEQ_NARROW_PC = 1'b0
 ) (
   input  logic                clk,
   input  logic                sys_rst,      // the loader's reset
@@ -122,11 +127,15 @@ module otpu_asic_top
                .ACT_ROWS(ACT_ROWS), .TMEM_WORDS(TMEM_WORDS), .IMEM_WORDS(IMEM_WORDS),
                .FIFO_DEPTH(FIFO_DEPTH), .LANES(LANES), .WIN(WIN), .RPB(RPB), .WPB(WPB),
                .MXU_IMPL(MXU_IMPL), .MXU_CL(MXU_CL), .MXU_E(MXU_E), .VPU_CL(VPU_CL),
-               .ULANES(ULANES), .HAS_DSTEP(HAS_DSTEP), .TMEM_IMPL(TMEM_IMPL),
+               .ULANES(ULANES), .VPU_COMPACT_COMP(VPU_COMPACT_COMP),
+               .VPU_COMPACT_STAGES(VPU_COMPACT_STAGES),
+               .VPU_COL_BRAM(VPU_COL_BRAM),
+               .HAS_DSTEP(HAS_DSTEP), .TMEM_IMPL(TMEM_IMPL),
                .TMEM_NSB(TMEM_NSB), .TMEM_SBP(TMEM_SBP), .TMEM_SBH(TMEM_SBH),
                .TMEM_RPL(TMEM_RPL), .TMEM_TDP(TMEM_TDP), .TMEM_GST(TMEM_GST),
                .TMEM_PMP(TMEM_PMP), .TMEM_PRK(TMEM_PRK), .TMEM_SDM(TMEM_SDM),
-               .SEQ_WC(SEQ_WC), .SEQ_FP_PIPE(SEQ_FP_PIPE)) u_slice (
+               .SEQ_WC(SEQ_WC), .SEQ_FP_PIPE(SEQ_FP_PIPE),
+               .SEQ_CMD_BRAM(SEQ_CMD_BRAM), .SEQ_NARROW_PC(SEQ_NARROW_PC)) u_slice (
     // clk_f: TMEM_PMP 0 (above), so no 2x clock
     .clk, .clk_f(1'b0), .sys_rst, .rst, .rinit(rinit_a), .ld_start, .ld_addr, .ld_n, .ld_busy,
     .a_rdy, .b_rdy, .sw_rdy, .wr_idle, .rd_idle,

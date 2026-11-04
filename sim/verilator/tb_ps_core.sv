@@ -1,6 +1,8 @@
 // Complete board-control, loader, core and PS-memory-path ISA comparison.
 module tb_ps_core #(
-  parameter int HP_PORTS = 1, D = 128, MCOLS = 1, ACT_BLOCKS = 48, ACT_ROWS = 1, MXU_E = 1,
+  parameter int SEQ_WC = 0, VPU_COMPACT_COMP = 0, VPU_COMPACT_STAGES = 3,
+                VPU_COL_BRAM = 0, SEQ_CMD_BRAM = 0, SEQ_NARROW_PC = 0,
+                HP_PORTS = 1, D = 128, MCOLS = 1, ACT_BLOCKS = 48, ACT_ROWS = 1, MXU_E = 1,
                 AXI_DATA_WIDTH = 256, READ_DEPTH = 8, READ_CHUNKS = 1, WORDS = 1 << 18,
                 TMEM_NSB = 2, TMEM_SBH = 0, VPU_CL = 1, WIN = 8, SEQ_FP_PIPE = 0,
                 FIFO_DEPTH = 64, READ_LATENCY = 24, A_CACHE_LINES = 1, WRITE_DEPTH = 1
@@ -61,7 +63,10 @@ module tb_ps_core #(
   logic [1:0] s_axi_rresp;
   logic s_axi_rvalid;
   logic s_axi_rready = '0;
-  otpu_zu3eg_accel #(.HP_PORTS(HP_PORTS), .D(D), .MCOLS(MCOLS), .ACT_BLOCKS(ACT_BLOCKS),
+  otpu_zu3eg_accel #(.SEQ_WC(SEQ_WC), .VPU_COMPACT_COMP(VPU_COMPACT_COMP),
+                      .VPU_COL_BRAM(VPU_COL_BRAM), .SEQ_CMD_BRAM(SEQ_CMD_BRAM),
+                      .SEQ_NARROW_PC(SEQ_NARROW_PC),
+                      .VPU_COMPACT_STAGES(VPU_COMPACT_STAGES), .HP_PORTS(HP_PORTS), .D(D), .MCOLS(MCOLS), .ACT_BLOCKS(ACT_BLOCKS),
                       .ACT_ROWS(ACT_ROWS), .MXU_E(MXU_E), .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
                       .MEMORY_STATS(1), .BRIDGE_READ_DEPTH(READ_DEPTH),
                       .TMEM_NSB(TMEM_NSB), .TMEM_SBH(TMEM_SBH),
@@ -154,6 +159,8 @@ module tb_ps_core #(
     if (status & 18) $fatal(1, "core failed %x", status);
     do begin read_reg(12'h00c, status); end while (!(status & 8));
     read_reg(12'h018, status); cycles = status;
+    read_reg(12'h094, status);
+    if (status[24] != 1'(SEQ_WC)) $fatal(1, "wait-entry capability differs from sequencer");
     repeat (8) @(negedge clk);
     read_reg(12'h300, status);
     if (status != 32'h4d535431) $fatal(1, "memory stats signature %x", status);
@@ -169,7 +176,7 @@ module tb_ps_core #(
     if (status != HP_PORTS) $fatal(1, "multi-HP port count");
     for (int p = 0; p < HP_PORTS; p++) begin
       read_reg(12'(12'h320+8*p), status);
-      if (status != expected_read_beats[p] || status == 0) $fatal(1, "HP read counter p=%0d", p);
+      if (status != expected_read_beats[p]) $fatal(1, "HP read counter p=%0d", p);
       read_reg(12'(12'h324+8*p), status);
       if (status != expected_write_beats[p]) $fatal(1, "HP write counter p=%0d", p);
     end

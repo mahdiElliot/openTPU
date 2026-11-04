@@ -7,6 +7,7 @@ source [file join $out build_params.tcl]
 if {![info exists separate_mmcm]} {set separate_mmcm 0}
 if {![info exists implementation_strategy]} {set implementation_strategy default}
 if {![info exists hp_ports]} {set hp_ports 1}
+if {![info exists synthesis_directive]} {set synthesis_directive default}
 set_param general.maxThreads 4
 create_project -force opentpu_zu3eg [file join $out project] -part xczu3eg-sfvc784-1-i
 set_property verilog_define {SYNTHESIS} [current_fileset]
@@ -131,6 +132,17 @@ close $cf
 add_files -fileset constrs_1 $clock_constraints
 set_property PROCESSING_ORDER LATE [get_files $clock_constraints]
 write_bd_tcl -force [file join $out system_bd.tcl]
+if {$synthesis_directive ne "default"} {
+  # launch_runs normally creates the BD's OOC runs lazily. Materialize them first
+  # so the core receives the directive as well as the otherwise mostly empty top.
+  create_ip_run [get_files system.bd]
+  # Customize the accelerator and top, retaining the generated vendor IP's native mapping.
+  set area_runs [get_runs {synth_1 system_accelerator_0_synth_1}]
+  if {[llength $area_runs] != 2} {error "Cannot identify both accelerator and top synthesis runs"}
+  foreach run $area_runs {
+    set_property STEPS.SYNTH_DESIGN.ARGS.DIRECTIVE $synthesis_directive $run
+  }
+}
 launch_runs synth_1 -jobs 2
 wait_on_run synth_1
 if {[get_property PROGRESS [get_runs synth_1]] != "100%"} {error "Synthesis failed"}

@@ -125,7 +125,8 @@ def preflight(model, target, capacity, prompt_count, decode_count, out, rows=1, 
                 checks.append({'position': position, 'kind': 'grouped_rows', 'rows': n, 'instructions': counts})
     if any(max(c['instructions']) * 8 > cfg.IMEM_WORDS for c in checks):
         raise RuntimeError('At least one program exceeds the target instruction memory')
-    if 0x10000000 + image.nbytes + cfg.IMEM_WORDS * 4 >= 0x80000000:
+    from opentpu import waits as W
+    if 0x10000000 + image.nbytes + W.area(cfg.IMEM_WORDS, cfg.SEQ_WC) >= 0x80000000:
         raise RuntimeError('Image and programs exceed the physical DDR window')
     result = {'target': target, 'config': asdict(cfg), 'capacity': capacity,
               'prefill': prompt_count, 'decode': decode_count, 'prefill_rows': rows, 'image_bytes': image.nbytes,
@@ -194,6 +195,23 @@ def forward_prefill(eng, ids, progress, compile_ahead=False, rows=1):
 def reference_run(options, ids, request_id, tokenizer):
     eng = engine(options.model, options.out, 'isa', options.target, options.capacity,
                  rows=options.image_rows, device_decode=options.device_decode)
+    if eng.cfg.SEQ_WC:
+        # Prepare exactly the same dependency tables the hardware transport uses.
+        # Their verified cache is keyed by instruction words, argument bounds and
+        # compiler source, so timed board runs need not repeat this analysis.
+        from .jtag import program_words
+        original_run = eng.backend.run
+
+        def run_with_entries(programs, args=None):
+            for program in programs:
+                program_words(eng.cfg, program)
+            return original_run(programs, args=args)
+
+        eng.backend.run = run_with_entries
+        if options.device_decode:
+            for program in eng.image.compile_generate(len(ids)//eng.block+1, len(ids),
+                                                       eng.block, chain=False, debug=True):
+                program_words(eng.cfg, program)
     begin = time.monotonic()
     try:
         def progress(position, elapsed, count=1):

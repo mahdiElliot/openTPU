@@ -2,12 +2,35 @@
 import argparse
 import json
 import math
+import re
 import subprocess
 from pathlib import Path
 
 from opentpu import target as T
 
 from .settings import AXI_DATA_WIDTH, CORE_MHZ, DEPLOY, HP_PORTS, MEM_MHZ, ROOT, TARGET
+from .jtag import quote
+
+
+def specialize_wrapper(path, width, dimension, reads, writes, chunks, cache_lines):
+    """Advertise actual bridge limits so AXI IP need not provision maximum queues."""
+    text = (ROOT/'rtl/boards/mys-zu3eg/otpu_zu3eg_wrapper.v').read_text()
+    limits = {
+        'M_AXI': (reads, writes, max(chunks*dimension//(width//8), dimension//(width//8))),
+        'M_META_AXI': (2, writes, 32*cache_lines//(width//8)),
+    }
+    # In a legacy one-port build M_AXI includes both traffic classes.
+    limits['M_AXI'] = (*limits['M_AXI'][:2], max(limits['M_AXI'][2], limits['M_META_AXI'][2]))
+    for bus, (rd, wr, burst) in limits.items():
+        pattern = (rf'XIL_INTERFACENAME {bus}, NUM_READ_OUTSTANDING \d+, '
+                   r'NUM_WRITE_OUTSTANDING \d+, MAX_BURST_LENGTH \d+')
+        replacement = (f'XIL_INTERFACENAME {bus}, NUM_READ_OUTSTANDING {rd}, '
+                       f'NUM_WRITE_OUTSTANDING {wr}, MAX_BURST_LENGTH {burst}')
+        text, count = re.subn(pattern, replacement, text)
+        if count != 1:
+            raise ValueError(f'Cannot specialize AXI limits for {bus}')
+    path.write_text(text)
+    return {bus: dict(reads=rd, writes=wr, burst=burst) for bus, (rd, wr, burst) in limits.items()}
 
 
 def main():
@@ -27,11 +50,22 @@ def main():
     parser.add_argument('--memory-stats', action='store_true', help='add per-run memory demand-stall counters')
     parser.add_argument('--scheduler-pipeline', action='store_true',
                         help='register scheduler ranges before footprint compaction')
+    parser.add_argument('--compact-vpu', action='store_true',
+                        help='experimental arithmetic sharing; saves LUTs but can reduce token throughput')
+    parser.add_argument('--compact-stages', type=int, choices=(1, 2, 3), default=3,
+                        help='shared arithmetic stages (fewer stages save LUTs at lower throughput)')
+    parser.add_argument('--area-buffers', action=argparse.BooleanOptionalAction, default=True,
+                        help='map registered command and OUTER buffers to BRAM without extra cycles')
+    parser.add_argument('--narrow-pc', action=argparse.BooleanOptionalAction, default=True,
+                        help='size instruction addresses for IMEM; keep 32-bit loop trip counts')
     parser.add_argument('--separate-mmcm', action='store_true',
                         help='generate core and HP clocks with independent MMCMs')
     parser.add_argument('--strategy', default='default', choices=(
         'default', 'Performance_Explore', 'Congestion_SpreadLogic_high',
         'Performance_ExplorePostRoutePhysOpt'), help='Vivado implementation strategy')
+    parser.add_argument('--synth-directive', default='AreaOptimized_high',
+                        choices=('default', 'AreaOptimized_high', 'AreaOptimized_medium'),
+                        help='area mapping without changing instruction timing')
     parser.add_argument('--read-depth', type=int, choices=(8, 16, 32), default=8)
     parser.add_argument('--scale-cache-lines', type=int, choices=(1, 2, 4, 8), default=1,
                         help='adjacent 32-byte scale lines per cache fill')
@@ -47,8 +81,10 @@ def main():
         parser.error('core and HP AXI clocks must be positive and at most 333 MHz')
     target = T.load(options.target)
     cfg = T.config(target)
-    if cfg.S != 1 or cfg.D not in (32, 64, 128) or cfg.DSTEP or cfg.STREAM or cfg.SEQ_WC:
-        parser.error('this shell supports S=1, D=32/64/128, DSTEP=STREAM=SEQ_WC=false')
+    if cfg.S != 1 or cfg.D not in (32, 64, 128) or cfg.DSTEP or cfg.STREAM:
+        parser.error('this shell supports S=1, D=32/64/128, DSTEP=STREAM=false')
+    if cfg.SEQ_WC and target.uarch['WIN'] > 16:
+        parser.error('compiler wait entries support a scheduler window of at most 16')
     if cfg.DRAM_BYTES != 1 << 31 or target.tech.get('part') != 'xczu3eg-sfvc784-1-i':
         parser.error('this board shell requires the exact ZU3EG part and a logical 2-GiB DDR configuration')
     if target.uarch['MXU_IMPL'] != 2:
@@ -59,9 +95,13 @@ def main():
         parser.error('eight scale-cache lines require the 256-bit AXI interface')
     files = T.CORE + T.TECH['xilinxus'] + ['asic/otpu_asic_top.sv', 'shell/otpu_ctrl.sv',
             'boards/mys-zu3eg/otpu_ps_dram.sv', 'boards/mys-zu3eg/otpu_ps_dram_multi.sv',
-            'boards/mys-zu3eg/otpu_zu3eg_accel.sv',
-            'boards/mys-zu3eg/otpu_zu3eg_wrapper.v']
-    (out / 'sources.tcl').write_text('set rtl_sources {' + ' '.join(files) + '}\n')
+            'boards/mys-zu3eg/otpu_zu3eg_accel.sv']
+    wrapper = out/'otpu_zu3eg_wrapper.v'
+    interface_limits = specialize_wrapper(wrapper, options.axi_data_width, cfg.D,
+                                         options.read_depth, options.write_depth,
+                                         options.read_chunks, options.scale_cache_lines)
+    (out / 'sources.tcl').write_text('set rtl_sources {' + ' '.join(files) + '}\n' +
+                                   f'lappend rtl_sources {quote(wrapper)}\n')
     parameters = {k: T.rtl_params(target)[k] for k in (
         'D', 'MCOLS', 'ACT_BLOCKS', 'ACT_ROWS', 'TMEM_WORDS', 'IMEM_WORDS',
         'FIFO_DEPTH', 'LANES', 'WIN', 'MXU_CL', 'MXU_E', 'VPU_CL', 'ULANES',
@@ -71,6 +111,12 @@ def main():
     parameters['HP_PORTS'] = options.hp_ports
     parameters['MEMORY_STATS'] = int(options.memory_stats)
     parameters['SEQ_FP_PIPE'] = int(options.scheduler_pipeline)
+    parameters['SEQ_WC'] = int(cfg.SEQ_WC)
+    parameters['VPU_COMPACT_COMP'] = int(options.compact_vpu)
+    parameters['VPU_COMPACT_STAGES'] = options.compact_stages
+    parameters['SEQ_CMD_BRAM'] = int(options.area_buffers)
+    parameters['VPU_COL_BRAM'] = int(options.area_buffers)
+    parameters['SEQ_NARROW_PC'] = int(options.narrow_pc)
     parameters['BRIDGE_A_CACHE_LINES'] = options.scale_cache_lines
     parameters['BRIDGE_WRITE_DEPTH'] = options.write_depth
     parameters.update(BRIDGE_READ_DEPTH=options.read_depth, BRIDGE_B_DEPTH=options.read_depth,
@@ -78,6 +124,7 @@ def main():
     (out / 'build_params.tcl').write_text(
         f'set core_mhz {options.core_mhz}\nset mem_mhz {mem_mhz}\nset axi_data_width {options.axi_data_width}\nset hp_ports {options.hp_ports}\n' +
         f'set separate_mmcm {int(options.separate_mmcm)}\nset implementation_strategy {{{options.strategy}}}\n' +
+        f'set synthesis_directive {{{options.synth_directive}}}\n' +
         'set accelerator_parameters {' + ' '.join(
             f'CONFIG.{k} {int(v)}' for k, v in parameters.items()) + '}\n')
     metadata = target.to_dict() | {
@@ -87,6 +134,8 @@ def main():
         'scheduler_footprint_pipeline': options.scheduler_pipeline,
         'separate_mmcm': options.separate_mmcm,
         'implementation_strategy': options.strategy,
+        'synthesis_directive': options.synth_directive,
+        'synthesis_directive_scope': 'accelerator and top; vendor IP uses its defaults',
         'ps_pl0_input_mhz': 100, 'input_jitter_ns': 0.100, 'control_base': '0x80000000',
         'ddr_base': '0x10000000', 'ps_boot': 'preserve existing initialized PS DDR; PL-only programming',
         'memory_bridge': f'queued {options.axi_data_width}-bit bridge, 128-bit HP ports {[0, 1][:options.hp_ports]}, up to {options.read_depth} reads outstanding, up to {options.read_chunks} chunks per read burst, independent writes, {32*options.scale_cache_lines}-byte scale cache',
@@ -95,6 +144,7 @@ def main():
         'scale_cache_lines': options.scale_cache_lines,
         'write_depth': options.write_depth,
         'bridge_axi_bits': options.axi_data_width, 'hp_axi_bits': 128,
+        'axi_interface_limits': interface_limits,
         'width_conversion_clock': 'HP AXI' if options.axi_data_width != 128 else 'none'}
     if options.loader:
         metadata = {'purpose': 'temporary DDR bulk loader; no accelerator core',

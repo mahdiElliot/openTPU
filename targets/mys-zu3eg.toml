@@ -94,6 +94,22 @@ TMEM_SBH = 1
 VPU_CL = 2
 WIN = 8
 
+# Experimental area/performance tradeoff: compiler wait entries replace runtime
+# footprint comparisons. Measured prefill is slower; use r6-cl2 for unchanged throughput.
+[variants.d64-m2-r6-wc]
+D = 64
+MCOLS = 2
+ACT_BLOCKS = 96
+ACT_ROWS = 6
+PAIR = true
+MXU_E = 1
+FIFO_DEPTH = 128
+TMEM_NSB = 4
+TMEM_SBH = 1
+VPU_CL = 2
+WIN = 8
+SEQ_WC = true
+
 [variants.d32-m4]
 D = 32
 MCOLS = 4

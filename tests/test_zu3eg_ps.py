@@ -91,7 +91,8 @@ def test_ps_bridge_pipelines_writes_and_keeps_read_after_write_fences(width, wri
                                         ("mys-zu3eg:d128-m1-r4-cl2", "int4")])
 @pytest.mark.parametrize('combined', [False, True])
 @pytest.mark.parametrize('fp_pipe', [False, True])
-def test_ps_board_kernel_matches_isa(tmp_path, target, fmt, combined, fp_pipe, hp_ports=1):
+def test_ps_board_kernel_matches_isa(tmp_path, target, fmt, combined, fp_pipe, hp_ports=1, compact_vpu=False,
+                                   area_buffers=False, narrow_pc=False):
     import sys
     from dataclasses import replace
 
@@ -111,16 +112,22 @@ def test_ps_board_kernel_matches_isa(tmp_path, target, fmt, combined, fp_pipe, h
         if isinstance(value, Weight):
             value.fmt = fmt
     compiled, images = compile_kernel(mlp, cfg, **arguments)
-    _compare_ps_core(tmp_path, target, cfg, compiled.programs, images, combined, fp_pipe, hp_ports=hp_ports)
+    _compare_ps_core(tmp_path, target, cfg, compiled.programs, images, combined, fp_pipe,
+                            hp_ports=hp_ports, compact_vpu=compact_vpu,
+                            area_buffers=area_buffers, narrow_pc=narrow_pc)
 
 
-def _compare_ps_core(tmp_path, target, cfg, programs, images, combined, fp_pipe, program_at=None, hp_ports=1):
+def _compare_ps_core(tmp_path, target, cfg, programs, images, combined, fp_pipe, program_at=None,
+                     hp_ports=1, compact_vpu=False, compact_stages=3,
+                     area_buffers=False, narrow_pc=False):
     import numpy as np
     from opentpu import isa as I, target as T
     from opentpu.isasim import Machine
-    program_at = cfg.DRAM_BYTES - 4 * cfg.IMEM_WORDS if program_at is None else program_at
+    from opentpu import waits as W
+    from tools.zu3eg.jtag import program_words
+    program_at = cfg.DRAM_BYTES - W.area(cfg.IMEM_WORDS, cfg.SEQ_WC) if program_at is None else program_at
     assert not np.any(images[0][program_at:])
-    words = np.asarray(I.assemble(programs[0]), dtype='<u4')
+    words = program_words(cfg, programs[0])
     image = np.zeros(cfg.DRAM_BYTES, dtype=np.uint8)
     image[:len(images[0])] = images[0]
     image[program_at:program_at + words.nbytes] = words.view(np.uint8)
@@ -141,6 +148,12 @@ def _compare_ps_core(tmp_path, target, cfg, programs, images, combined, fp_pipe,
         parameters['WIN'] = T.load(target).uarch['WIN']
         parameters['SEQ_FP_PIPE'] = int(fp_pipe)
         parameters['HP_PORTS'] = hp_ports
+        parameters['SEQ_WC'] = int(cfg.SEQ_WC)
+        parameters['VPU_COMPACT_COMP'] = int(compact_vpu)
+        parameters['VPU_COMPACT_STAGES'] = compact_stages
+        parameters['SEQ_CMD_BRAM'] = int(area_buffers)
+        parameters['VPU_COL_BRAM'] = int(area_buffers)
+        parameters['SEQ_NARROW_PC'] = int(narrow_pc)
         if combined:
             parameters.update(READ_DEPTH=16, READ_CHUNKS=4)
         executable = rtlsim.build('tb_ps_core', sources + [
@@ -157,19 +170,21 @@ def _compare_ps_core(tmp_path, target, cfg, programs, images, combined, fp_pipe,
         assert np.array_equal(actual, reference.slices[0].dram)
         scratchpad = rtlsim._read_hex(tmp_path / 'tmem_0.hex', cfg.TMEM_WORDS)
         assert np.array_equal(scratchpad, reference.slices[0].tmem)
+        return int(stats[1])
     finally:
         rtlsim.VFLAGS[:] = flags
 
 
 @pytest.mark.parametrize('seed', range(4))
 @pytest.mark.parametrize('fp_pipe', [False, True])
-def test_ps_scheduler_pipeline_hazards_and_control(tmp_path, seed, fp_pipe, hp_ports=1):
+def test_ps_scheduler_pipeline_hazards_and_control(tmp_path, seed, fp_pipe, hp_ports=1,
+                                                  target='mys-zu3eg:d128-m1-r4-cl2', compact_vpu=False,
+                                                  area_buffers=False, narrow_pc=False):
     from dataclasses import replace
     import numpy as np
     from opentpu import isa as I, target as T
     from test_rtl import _hazard_program, _images, DATA, SCRATCH
 
-    target = 'mys-zu3eg:d128-m1-r4-cl2'
     cfg = replace(T.config(target), DRAM_BYTES=1 << 20)
     rng = np.random.default_rng(8100 + seed)
     images = _images(rng, 1)
@@ -181,7 +196,8 @@ def test_ps_scheduler_pipeline_hazards_and_control(tmp_path, seed, fp_pipe, hp_p
     suffix = [I.ld(0xf4000, 12000, 1), I.rld(7, 12000, raw=True),
               I.st(SCRATCH + 4096, 8192, 8, ra=7), I.halt()]
     _compare_ps_core(tmp_path, target, cfg, [prefix + body + suffix], images, True, fp_pipe,
-                     program_at=0xf8000, hp_ports=hp_ports)
+                            program_at=0xf8000, hp_ports=hp_ports, compact_vpu=compact_vpu,
+                            area_buffers=area_buffers, narrow_pc=narrow_pc)
 
 
 @pytest.mark.parametrize('hp_ports', [2])
